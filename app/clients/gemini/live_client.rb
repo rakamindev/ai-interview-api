@@ -13,8 +13,8 @@ module Gemini
 
     INACTIVITY_TIMEOUT = 30 # seconds — reconnect if Gemini produces no meaningful response
     GATE_OPEN_DELAY    = 0.8 # seconds after generationComplete before opening mic gate
-                             # — lets frontend audio buffer drain so the mic doesn't
-                             # pick up the AI's speaker output and create an echo loop
+    # — lets frontend audio buffer drain so the mic doesn't
+    # pick up the AI's speaker output and create an echo loop
 
     # The frontend stops sending audio after ~50ms of silence, but Gemini's
     # automatic VAD needs ~1s of continuous silence to detect end-of-speech.
@@ -30,10 +30,10 @@ module Gemini
     # won't cycle on natural speech. At 200ms, the pump fires on every pause,
     # gets cancelled when speech resumes, and Gemini never accumulates enough
     # continuous silence to trigger turnComplete.
-    SILENCE_PUMP_DELAY    = 0.5        # wait 500ms after last real audio before pumping
+    SILENCE_PUMP_DELAY    = 1 # wait 1s after last real audio before pumping
     SILENCE_PUMP_INTERVAL = 0.03      # ~30ms between frames (matches worklet cadence)
-    SILENCE_FRAME_SAMPLES = 640       # 40ms at 16kHz — slightly over-sized so EM timer 
-                                      # jitter never creates a perceived gap in silence
+    SILENCE_FRAME_SAMPLES = 640       # 40ms at 16kHz — slightly over-sized so EM timer
+    # jitter never creates a perceived gap in silence
     SILENCE_FRAME = ("\x00" * (SILENCE_FRAME_SAMPLES * 2)).freeze # 16-bit PCM zeros
 
     attr_reader :resumption_token, :connected, :connected_at, :inactivity_close, :resumption_failed
@@ -158,7 +158,7 @@ module Gemini
     # If it briefly tries, the candidate's ongoing audio interrupts it.
     # Returns true if the injection was sent, false if it was skipped.
     # Callers that need guaranteed delivery should retry on false.
-    def inject_context(text)
+    def inject_context(text, turn_complete: true)
       return false unless @connected && @ws
 
       # Don't inject while audio is in flight in either direction:
@@ -176,7 +176,7 @@ module Gemini
             role: 'user',
             parts: [{ text: text }]
           }],
-          turnComplete: true
+          turnComplete: turn_complete
         }
       }
 
@@ -193,7 +193,7 @@ module Gemini
       message = {
         clientContent: {
           turns: [{
-            role:  'user',
+            role: 'user',
             parts: [{ text: '' }]
           }],
           turnComplete: true
@@ -253,9 +253,7 @@ module Gemini
     #      that confuses Gemini's VAD)
     def schedule_silence_pump
       # Always stop the periodic pump if running — real audio arrived, silence must stop.
-      if @silence_pumping
-        stop_silence_pump
-      end
+      stop_silence_pump if @silence_pumping
 
       # Track when real audio last arrived — cheap, no timer allocation.
       @last_real_audio_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
@@ -368,11 +366,11 @@ module Gemini
         parts << 'interrupted' if interrupted
         parts << 'audio' if has_audio
         if has_input_tx
-          input_tx_text = sc.dig('inputTranscription', 'parts', 0, 'text')
+          input_tx_text = sc.dig('inputTranscription', 'parts', 0, 'text') || sc.dig('inputTranscription', 'text')
           parts << "inputTx=#{input_tx_text.truncate(50)}" if input_tx_text.present?
         end
         if has_output_tx
-          output_tx_text = sc.dig('outputTranscription', 'parts', 0, 'text')
+          output_tx_text = sc.dig('outputTranscription', 'parts', 0, 'text') || sc.dig('outputTranscription', 'text')
           parts << "outputTx=#{output_tx_text.truncate(50)}" if output_tx_text.present?
         end
         parts << 'turnComplete' if turn_complete
@@ -382,9 +380,9 @@ module Gemini
       end
 
       Rails.logger.info('[Gemini::LiveClient] Event: setupComplete') if data['setupComplete']
-      if data['sessionResumption'] || data['sessionResumptionUpdate']
-        Rails.logger.info('[Gemini::LiveClient] Event: resumptionToken updated')
-      end
+      return unless data['sessionResumption'] || data['sessionResumptionUpdate']
+
+      Rails.logger.info('[Gemini::LiveClient] Event: resumptionToken updated')
     end
 
     def send_setup(resumption_handle: nil)
@@ -436,12 +434,12 @@ module Gemini
       # Audio response from AI
       if (parts = data.dig('serverContent', 'modelTurn', 'parts'))
         parts.each do |part|
-          if (inline = part['inlineData'])
-            stop_silence_pump unless @model_emitting_audio  # defensive: ensure pump is off
-            @model_emitting_audio = true
-            audio_bytes = Base64.strict_decode64(inline['data'])
-            @on_audio&.call(audio_bytes)
-          end
+          next unless (inline = part['inlineData'])
+
+          stop_silence_pump unless @model_emitting_audio # defensive: ensure pump is off
+          @model_emitting_audio = true
+          audio_bytes = Base64.strict_decode64(inline['data'])
+          @on_audio&.call(audio_bytes)
         end
       end
 
@@ -470,6 +468,7 @@ module Gemini
       # The model's subsequent turnComplete falls through to the user's branch
       # as a harmless no-op (pump not running, buffer empty).
       if data.dig('serverContent', 'generationComplete')
+        emitted_audio = @model_emitting_audio
         @model_emitting_audio = false
 
         if @input_text_buffer.present?
@@ -482,33 +481,36 @@ module Gemini
           @output_text_buffer = +''
         end
 
-        # Delay gate opening so frontend audio playback drains and the mic
-        # doesn't pick up speaker echo.
-        Rails.logger.info("[Gemini::LiveClient] generationComplete — output_emitted=#{@model_emitting_audio} output_buffer=#{@output_text_buffer.length}chars")
-        @gate_timer&.cancel
-        @gate_timer = EM::Timer.new(GATE_OPEN_DELAY) do
-          unless @superseded
-            Rails.logger.info('[Gemini::LiveClient] Gate open — firing on_model_turn_complete (speaker_changed:candidate will be sent)')
-            @on_model_turn_complete&.call
+        if emitted_audio
+          # AI spoke — delay gate opening so frontend audio buffer drains
+          # and the mic doesn't pick up speaker echo.
+          @gate_timer&.cancel
+          @gate_timer = EM::Timer.new(GATE_OPEN_DELAY) do
+            unless @superseded
+              Rails.logger.info('[Gemini::LiveClient] Gate open — firing on_model_turn_complete')
+              @on_model_turn_complete&.call
+            end
           end
+        else
+          # Empty generation (0 audio) — likely from coverage injection.
+          # No speaker output to drain, so skip the gate delay entirely.
+          Rails.logger.debug('[Gemini::LiveClient] Empty generationComplete (0 audio) — skipping gate delay')
         end
       end
 
       # Interrupted fires when the candidate speaks over the model. Open the
       # gate immediately — the candidate is actively speaking, so we need
       # their audio to flow regardless of echo risk.
-      if data.dig('serverContent', 'interrupted')
-        if @model_emitting_audio
-          @model_emitting_audio = false
-          @model_interrupted = true
-          @gate_timer&.cancel
-          Rails.logger.info('[Gemini::LiveClient] Model interrupted — resetting audio gate immediately')
-          if @output_text_buffer.present?
-            @on_output_transcription&.call(@output_text_buffer.strip)
-            @output_text_buffer = +''
-          end
-          @on_model_turn_complete&.call
+      if data.dig('serverContent', 'interrupted') && @model_emitting_audio
+        @model_emitting_audio = false
+        @model_interrupted = true
+        @gate_timer&.cancel
+        Rails.logger.info('[Gemini::LiveClient] Model interrupted — resetting audio gate immediately')
+        if @output_text_buffer.present?
+          @on_output_transcription&.call(@output_text_buffer.strip)
+          @output_text_buffer = +''
         end
+        @on_model_turn_complete&.call
       end
 
       if data.dig('serverContent', 'turnComplete')

@@ -100,13 +100,17 @@ module Assessments
 
         6. NATURAL TRANSITIONS
         Do not announce topic changes with "Now let's talk about X."
-        Find a bridge: "The caching approach you described — how does that thinking apply when you're designing a larger system from scratch?"
+        Never mention skill names, topic names, or summarize what was already covered. The candidate should not know which skills are being assessed.
+        Bad: "We've discussed a lot about problem solving. Let's move on."
+        Good: "The caching approach you described — how does that thinking apply when you're designing a larger system from scratch?"
 
         7. WRAP UP NATURALLY
-        When all skills are covered OR when you receive a time warning, close naturally.
+        When all skills are covered OR when you receive a time warning, close the conversation naturally with a brief, warm closing statement.
+        Do NOT ask follow-up questions like "Do you have any questions?" or "Is there anything else?"
         Do NOT mention skill names, topic names, or summarize what was covered.
-        Bad: "Alright, that covers problem solving and Node.js."
-        Good: "I think we've covered everything I wanted to explore. That was a solid conversation. Do you have any questions about the role or the team?"
+        Keep it short and natural — one closing statement, then stop.
+        Bad: "That covers problem solving and Node.js. Do you have any questions about the role?"
+        Good: "I think we've covered everything I wanted to explore. That was a solid conversation — thank you for your time, and you'll hear back from the team soon."
       TEXT
     end
 

@@ -119,6 +119,10 @@ module Coverage
         map = find_map(coverage_maps, update['id'])
         next unless map
 
+        # Skill is already covered — freeze it. Flash keeps seeing old turns
+        # in the sliding window and would keep incrementing probe_count.
+        next if map.state == 'covered'
+
         new_state       = update['new_state']
         raw_probe_count = update['new_probe_count'].to_i
         reason          = update['reason']

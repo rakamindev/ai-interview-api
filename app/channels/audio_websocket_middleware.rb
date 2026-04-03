@@ -174,9 +174,12 @@
               if !state.model_speaking &&
                  state.cached_coverage_text.present? &&
                  current_digest != state.last_injected_digest
-                gemini_ref.inject_context(state.cached_coverage_text)
-                state.last_injected_digest = current_digest
-                Rails.logger.debug("[AudioWS] Coverage injected (digest=#{current_digest&.slice(0, 8)})")
+                if gemini_ref.inject_context(state.cached_coverage_text)
+                  state.last_injected_digest = current_digest
+                  Rails.logger.debug("[AudioWS] Coverage injected (digest=#{current_digest&.slice(0, 8)})")
+                else
+                  Rails.logger.debug('[AudioWS] Coverage injection skipped — will retry next turn')
+                end
               end
 
               # Push DB writes off the EM thread so we don't stall audio forwarding.
@@ -214,8 +217,8 @@
               # the candidate stops talking after the AI's closing statement.
               check_time_ceiling(session, state, browser_ws)
 
-              # Auto-end when all configured skills are covered (AI concluded naturally)
-              check_coverage_complete(session, state, browser_ws)
+              # Auto-end disabled — session ends when candidate clicks "End Interview"
+              # or time ceiling is reached. Coverage-based auto-end is in backlog.
             },
 
             # Fires after the model's turnComplete — all audio frames have been sent,
@@ -224,6 +227,7 @@
               Rails.logger.info("[AudioWS] Model turn complete — ai_audio_chunks=#{state.ai_audio_chunks || 0} sending speaker_changed:candidate")
               state.model_speaking = false
               state.ai_audio_chunks = 0
+
               send_json(browser_ws, type: 'speaker_changed', speaker: 'candidate')
             },
 
@@ -261,7 +265,7 @@
                 Rails.logger.info("[AudioWS] Gemini reconnected for session #{session.id}")
                 if state.full_reconnect_pending
                   state.full_reconnect_pending = false
-                  restore_conversation_context(state)
+                  restore_conversation_context(browser_ws, state)
                 else
                   replay_buffered_audio(state)
                 end
@@ -466,28 +470,45 @@
         # On a full reconnect (resumption token expired/failed), Gemini has no
         # conversation history and would restart the interview from scratch.
         # Inject the last N transcript turns so it can continue naturally.
-        def restore_conversation_context(state)
-          session   = state.session
-          gemini    = state.gemini_client
+        def restore_conversation_context(browser_ws, state)
+          session = state.session
+          gemini  = state.gemini_client
+
+          # Gate candidate audio BEFORE the injection — the AI will respond
+          # to the history context and we don't want candidate audio colliding.
+          state.model_speaking = true
+          send_json(browser_ws, type: 'speaker_changed', speaker: 'ai')
 
           Thread.new do
             ActiveRecord::Base.connection_pool.with_connection do
               turns = session.transcript_turns.ordered.last(12)
 
               if turns.any?
+                last_speaker = turns.last.speaker
                 history = turns.map do |t|
                   label = t.speaker == 'ai' ? 'Interviewer' : 'Candidate'
                   "[#{label}]: #{t.text}"
                 end.join("\n")
 
-                header = '[SESSION RESUME] Do not acknowledge. Do not repeat the opening question.'
-                context = "#{header}\nConversation so far:\n\n#{history}\n\nContinue naturally."
+                header = '[SESSION RESUME — do not acknowledge this message]'
+                context = "#{header}\nConversation so far:\n\n#{history}\n\nContinue the interview from where it left off."
 
                 sid = session.id
-                Rails.logger.info("[AudioWS] Injecting #{turns.size} turns for full reconnect (session=#{sid})")
-                EM.schedule { gemini&.inject_context(context) }
+                Rails.logger.info("[AudioWS] Injecting #{turns.size} turns for full reconnect (session=#{sid}, last=#{last_speaker})")
+                EM.schedule do
+                  if last_speaker == 'ai'
+                    # AI already asked a question — inject as supplemental context
+                    # (turnComplete: false) so Gemini doesn't re-ask. The candidate's
+                    # audio will naturally complete the open turn via VAD.
+                    gemini&.inject_context(context, turn_complete: false)
+                    state.model_speaking = false
+                    send_json(browser_ws, type: 'speaker_changed', speaker: 'candidate')
+                  else
+                    # Candidate spoke last — prompt AI to continue (turnComplete: true)
+                    gemini&.inject_context(context)
+                  end
+                end
               else
-                # No history yet — treat like a fresh session
                 sid = session.id
                 Rails.logger.info("[AudioWS] Full reconnect with no transcript (session=#{sid})")
                 EM.schedule { gemini&.trigger_opening }
@@ -559,55 +580,6 @@
           # Duplicate turn — skip silently (idempotent)
         rescue StandardError => e
           Rails.logger.error("[AudioWS] Failed to save transcript turn: #{e.message}")
-        end
-
-        def check_coverage_complete(session, state, browser_ws)
-          return if state.ending_scheduled
-
-          # Set flag IMMEDIATELY on EM thread to prevent duplicate scheduling.
-          # Previously this was set inside Thread.new via EM.schedule, leaving a
-          # window where a second callback could pass the guard (H1 fix).
-          state.ending_scheduled = true
-
-          gemini_ref = state.gemini_client
-
-          # Move the DB query off the EM thread — CoverageMap.exists? can take
-          # 10-50ms and would block all audio processing while it runs.
-          Thread.new do
-            ActiveRecord::Base.connection_pool.with_connection do
-              uncovered = CoverageMap.where(session_id: session.id, is_discovered: false)
-                                    .where.not(state: 'covered').exists?
-
-              if uncovered
-                # Not all covered yet — reset the flag so future checks proceed.
-                EM.schedule { state.ending_scheduled = false }
-                next
-              end
-
-              # H3 fix: EM timer instead of sleep(5) — cancellable and doesn't
-              # hold a thread. Give the AI 5s to wrap up naturally.
-              EM.schedule do
-                state.coverage_end_timer = EM::Timer.new(5) do
-                  Thread.new do
-                    ActiveRecord::Base.connection_pool.with_connection do
-                      next if session.reload.ended?
-
-                      Sessions::EndHandler.new(session).call(reason: 'coverage_complete')
-                      EM.schedule do
-                        send_json(browser_ws, type: 'session_ended', reason: 'coverage_complete')
-                        gemini_ref&.close
-                        begin
-                          browser_ws.close
-                        rescue StandardError
-                          nil
-                        end
-                      end
-                    end
-                  end
-                end
-              end
-            end
-          end
         end
 
         def check_time_ceiling(session, state, browser_ws)
