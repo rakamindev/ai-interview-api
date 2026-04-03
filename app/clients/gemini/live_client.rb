@@ -9,7 +9,11 @@ module Gemini
   # Handles setup, audio streaming, transcription, coverage injection,
   # and GoAway reconnection.
   class LiveClient
-    GEMINI_WS_URL = 'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent'
+    # Vertex AI WebSocket endpoint for Gemini Live bidirectional streaming.
+    def self.vertex_ws_url
+      location = VertexAuth.location
+      "wss://#{location}-aiplatform.googleapis.com/ws/google.cloud.aiplatform.v1beta1.LlmBidiService/BidiGenerateContent"
+    end
 
     INACTIVITY_TIMEOUT = 30 # seconds — reconnect if Gemini produces no meaningful response
     GATE_OPEN_DELAY    = 0.8 # seconds after generationComplete before opening mic gate
@@ -40,7 +44,6 @@ module Gemini
 
     def initialize(
       system_prompt:,
-      api_key: nil,
       model: nil,
       voice: 'Puck',
       on_audio: nil,
@@ -54,7 +57,6 @@ module Gemini
       on_resumption_token_update: nil
     )
       @system_prompt = system_prompt
-      @api_key = api_key || ENV.fetch('GEMINI_API_KEY')
       @model = model || ENV.fetch('GEMINI_LIVE_MODEL', 'gemini-2.0-flash-live-001')
       @voice = voice
       @resumption_token = nil
@@ -86,9 +88,11 @@ module Gemini
       @setup_complete = false
       @resumption_received = false
 
-      url = "#{GEMINI_WS_URL}?key=#{@api_key}"
+      token = VertexAuth.access_token
+      url = self.class.vertex_ws_url
+      headers = { 'Authorization' => "Bearer #{token}" }
 
-      @ws = Faye::WebSocket::Client.new(url)
+      @ws = Faye::WebSocket::Client.new(url, nil, headers: headers)
 
       @ws.on :open do |_event|
         send_setup(resumption_handle: resumption_handle)
@@ -400,7 +404,8 @@ module Gemini
     def send_setup(resumption_handle: nil)
       setup = {
         setup: {
-          model: "models/#{@model}",
+          model: "projects/#{VertexAuth.project_id}/locations/#{VertexAuth.location}" \
+                 "/publishers/google/models/#{@model}",
           generationConfig: {
             responseModalities: ['AUDIO'],
             speechConfig: {

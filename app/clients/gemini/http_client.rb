@@ -2,8 +2,6 @@
 
 module Gemini
   class HttpClient
-    BASE_URL = 'https://generativelanguage.googleapis.com/v1'
-
     class ApiError < StandardError
       attr_reader :status, :body
 
@@ -17,24 +15,29 @@ module Gemini
     class RateLimitError < ApiError; end
     class TimeoutError < ApiError; end
 
-    def initialize(model: nil, api_key: nil, timeout: 60)
+    def initialize(model: nil, timeout: 60)
       @model = model
-      @api_key = api_key || ENV.fetch('GEMINI_API_KEY')
       @timeout = timeout
       @connection = build_connection
     end
 
-    # Generates content using Gemini REST API.
+    # Generates content using Gemini REST API via Vertex AI.
     # Returns parsed JSON response body.
     def generate_content(prompt, temperature: 0.2)
       body = {
-        contents: [{ parts: [{ text: prompt }] }],
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
         generationConfig: {
           temperature: temperature
         }
       }
 
-      response = @connection.post(generate_url, body.to_json, 'Content-Type' => 'application/json')
+      token = VertexAuth.access_token
+      headers = {
+        'Content-Type' => 'application/json',
+        'Authorization' => "Bearer #{token}"
+      }
+
+      response = @connection.post(generate_url, body.to_json, headers)
 
       parse_response(response)
     rescue Faraday::TimeoutError => e
@@ -46,7 +49,10 @@ module Gemini
     private
 
     def generate_url
-      "#{BASE_URL}/models/#{@model}:generateContent?key=#{@api_key}"
+      location   = VertexAuth.location
+      project_id = VertexAuth.project_id
+      "https://#{location}-aiplatform.googleapis.com/v1/projects/#{project_id}" \
+        "/locations/#{location}/publishers/google/models/#{@model}:generateContent"
     end
 
     def build_connection

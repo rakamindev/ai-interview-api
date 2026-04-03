@@ -32,6 +32,9 @@ gem 'faye-websocket'
 gem 'faraday', '~> 2.0'
 gem 'faraday-retry'
 
+# Vertex AI authentication (OAuth2 from service account credentials)
+gem 'googleauth', '~> 1.0'
+
 # PDF generation
 gem 'matrix' # required by prawn on Ruby >= 3.1
 gem 'prawn', '~> 2.4'
