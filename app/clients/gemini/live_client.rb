@@ -148,25 +148,26 @@ module Gemini
 
     # Injects hidden context directly into Gemini's conversation flow.
     #
-    # Uses turnComplete: true so the text turn is self-contained and closed
-    # immediately. With turnComplete: false, Gemini opens a text turn that
-    # its VAD can never close (VAD only closes audio turns). These "dangling"
-    # turns accumulate and eventually block VAD entirely — the root cause of
-    # the stall where audio is forwarded but no inputTx fires.
+    # EXPERIMENT (experiment/remove-vad-config): Reverted to turnComplete: false.
+    # With the custom realtimeInputConfig removed, Gemini's default turn
+    # management should treat this as supplemental context — not a standalone
+    # turn that needs closing. See tech-docs/report/turncomplete-dilemma.md.
     #
-    # The system prompt instructs the AI not to respond to these injections.
-    # If it briefly tries, the candidate's ongoing audio interrupts it.
+    # Previously used turnComplete: true which prevented dangling turns but
+    # introduced dual-voice risk and required 5 guards (model_emitting_audio,
+    # silence_pumping, model_speaking, GATE_OPEN_DELAY, model_interrupted).
+    #
     # Returns true if the injection was sent, false if it was skipped.
     # Callers that need guaranteed delivery should retry on false.
     def inject_context(text)
       return false unless @connected && @ws
 
-      # Don't inject while audio is in flight in either direction:
-      #   - @model_emitting_audio: AI is generating — would queue a second response
-      #   - @silence_pumping: realtimeInput stream is active — interleaving clientContent
-      #     with realtimeInput causes a 1008 protocol violation from Gemini
-      if @model_emitting_audio || @silence_pumping
-        Rails.logger.debug("[Gemini::LiveClient] inject_context skipped — model_emitting=#{@model_emitting_audio} silence_pumping=#{@silence_pumping}")
+      # EXPERIMENT (experiment/remove-vad-config): @silence_pumping guard removed.
+      # With turnComplete: false, clientContent is supplemental context — not a
+      # standalone turn. No 1008 risk from interleaving with realtimeInput.
+      # Keeping @model_emitting_audio as a safety net for Phase 1.
+      if @model_emitting_audio
+        Rails.logger.debug("[Gemini::LiveClient] inject_context skipped — model_emitting=#{@model_emitting_audio}")
         return false
       end
 
@@ -176,7 +177,7 @@ module Gemini
             role: 'user',
             parts: [{ text: text }]
           }],
-          turnComplete: true
+          turnComplete: false
         }
       }
 
@@ -252,6 +253,15 @@ module Gemini
     #      within natural intra-sentence pause range, sending spurious silence
     #      that confuses Gemini's VAD)
     def schedule_silence_pump
+      # EXPERIMENT (experiment/remove-vad-config): Silence pump disabled.
+      # Without custom realtimeInputConfig, Gemini's default VAD should
+      # handle silence detection from the browser's audio stream directly.
+      # The silence pump was needed because the custom VAD required
+      # continuous silence frames that the browser doesn't send.
+      # If the experiment fails (Gemini can't detect end-of-speech),
+      # re-enable by removing this early return.
+      return
+
       # Always stop the periodic pump if running — real audio arrived, silence must stop.
       if @silence_pumping
         stop_silence_pump
@@ -402,13 +412,11 @@ module Gemini
           systemInstruction: {
             parts: [{ text: @system_prompt }]
           },
-          realtimeInputConfig: {
-            automaticActivityDetection: {
-              startOfSpeechSensitivity: 'START_SENSITIVITY_LOW',
-              endOfSpeechSensitivity: 'END_SENSITIVITY_HIGH',
-              silenceDurationMs: 500
-            }
-          },
+          # realtimeInputConfig REMOVED (experiment/remove-vad-config)
+          # The original custom VAD config was never in the spec. Removing it
+          # lets Gemini use its default turn management, which may handle
+          # turnComplete: false correctly (no dangling turns). See:
+          # tech-docs/report/turncomplete-dilemma.md — "Option F"
           inputAudioTranscription: {},
           outputAudioTranscription: {},
           contextWindowCompression: {
