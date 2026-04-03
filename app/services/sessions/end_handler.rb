@@ -50,6 +50,8 @@ module Sessions
       redis.publish("coverage:#{@session.id}", { type: 'session_status', status: @session.status, end_reason: @session.end_reason }.to_json)
     rescue => e
       Rails.logger.error("[EndHandler] Failed to publish status update: #{e.message}")
+    ensure
+      redis&.close
     end
 
     def create_portfolio

@@ -26,6 +26,8 @@ module Sessions
       redis.publish("coverage:#{@session.id}", { type: 'session_status', status: @session.status, end_reason: nil }.to_json)
     rescue => e
       Rails.logger.error("[StartHandler] Failed to publish status update: #{e.message}")
+    ensure
+      redis&.close
     end
 
     def initialize_coverage_maps

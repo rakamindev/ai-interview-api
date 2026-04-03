@@ -21,7 +21,7 @@
 
 ## Critical -- Directly Causing or Contributing to Bugs
 
-### C1. Coverage cache race condition -- stale text injected with fresh digest
+### C1. Coverage cache race condition -- stale text injected with fresh digest (DONE)
 
 **Files:** `audio_websocket_middleware.rb:506-523` (background thread) vs `lines 173-178` (EM thread)
 
@@ -68,7 +68,7 @@ end
 
 ---
 
-### C2. Time warning injection silently lost when silence pump is active
+### C2. Time warning injection silently lost when silence pump is active (DONE)
 
 **Files:** `audio_websocket_middleware.rb:581-611` + `live_client.rb:166`
 
@@ -134,7 +134,7 @@ turnComplete: false // not a new conversation turn -- supplemental context
 
 ## High -- Reliability / Data Leakage Risks
 
-### H1. Duplicate auto-end race between middleware and worker
+### H1. Duplicate auto-end race between middleware and worker (DONE)
 
 Two independent code paths call `Sessions::EndHandler` for coverage-complete auto-end:
 
@@ -156,7 +156,7 @@ Additionally, the middleware's `ending_scheduled` flag is set via `EM.schedule` 
 
 ---
 
-### H2. Proactive reconnect during AI speech leaves browser mic muted
+### H2. Proactive reconnect during AI speech leaves browser mic muted (DONE)
 
 **File:** `audio_websocket_middleware.rb:421`
 
@@ -194,7 +194,7 @@ end
 
 ---
 
-### H3. `Thread.new { sleep() }` instead of EM timers
+### H3. `Thread.new { sleep() }` instead of EM timers (DONE)
 
 Three locations use `Thread.new { sleep(N) }` for delayed actions:
 
@@ -214,7 +214,7 @@ Three locations use `Thread.new { sleep(N) }` for delayed actions:
 
 ---
 
-### H4. Redis subscription thread leak in `CoverageWebSocketMiddleware`
+### H4. Redis subscription thread leak in `CoverageWebSocketMiddleware` (DONE)
 
 **File:** `coverage_websocket_middleware.rb`
 
@@ -228,7 +228,7 @@ The thread blocks indefinitely on Redis until the next message triggers a failed
 
 ---
 
-### H5. Redis connection created per publish (no pooling)
+### H5. Redis connection created per publish (no pooling) (DONE)
 
 **File:** `coverage_analyzer_worker.rb:73`
 

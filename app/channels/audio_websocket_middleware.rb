@@ -299,7 +299,15 @@
           state.proactive_reconnect_timer&.cancel
           state.reconnect_start_at ||= Process.clock_gettime(Process::CLOCK_MONOTONIC)
           state.reconnecting = true
-          state.model_speaking = false
+
+          # Notify browser if AI was speaking so frontend unmutes mic (H2 fix).
+          # Without this, the frontend stays in "ai speaking" state and the
+          # candidate's mic remains muted after reconnection completes.
+          if state.model_speaking
+            state.model_speaking = false
+            send_json(browser_ws, type: 'speaker_changed', speaker: 'candidate')
+          end
+
           state.latest_resumption_token = resumption_token
 
           session.update_column(:gemini_resumption_token, resumption_token)
@@ -377,6 +385,9 @@
           case message['type']
           when 'end_session'
             state.proactive_reconnect_timer&.cancel
+            state.graceful_end_timer&.cancel
+            state.time_ceiling_timer&.cancel
+            state.coverage_end_timer&.cancel
             state.audio_buffer.clear
             Sessions::EndHandler.new(state.session).call(reason: 'manual_candidate')
             send_json(browser_ws, type: 'session_ended', reason: 'manual_candidate')
@@ -418,7 +429,13 @@
           Rails.logger.info("[AudioWS] Initiating proactive reconnect for session #{state.session.id}")
           state.reconnect_start_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
           state.reconnecting = true
-          state.model_speaking = false
+
+          # Notify browser if AI was speaking so frontend unmutes mic (H2 fix).
+          if state.model_speaking
+            state.model_speaking = false
+            send_json(browser_ws, type: 'speaker_changed', speaker: 'candidate')
+          end
+
           state.session.update_column(:gemini_resumption_token, token)
 
           old_client = state.gemini_client
@@ -479,21 +496,21 @@
           end
         end
 
+        # H3 fix: EM.add_timer instead of Thread.new+sleep. The timer is
+        # cancellable (e.g., if the session ends during the grace period) and
+        # doesn't hold a Ruby thread for 2 minutes doing nothing.
         def schedule_graceful_end(browser_ws, state)
           return unless state.session
 
-          Thread.new do
-            sleep(BROWSER_GRACE_PERIOD)
+          state.graceful_end_timer = EM::Timer.new(BROWSER_GRACE_PERIOD) do
+            Thread.new do
+              ActiveRecord::Base.connection_pool.with_connection do
+                next if state.session.reload.ended?
 
-            ActiveRecord::Base.connection_pool.with_connection do
-              next if state.session.reload.ended?
-
-              Rails.logger.info("[AudioWS] Grace period expired — ending session #{state.session.id}")
-              Sessions::EndHandler.new(state.session).call(reason: 'error')
-              # Schedule close on the EM thread — cancelling EM timers (silence pump)
-              # from a background thread doesn't work and leaves the pump running,
-              # which causes Gemini to close with 1008.
-              EM.schedule { state.gemini_client&.close }
+                Rails.logger.info("[AudioWS] Grace period expired — ending session #{state.session.id}")
+                Sessions::EndHandler.new(state.session).call(reason: 'error')
+                EM.schedule { state.gemini_client&.close }
+              end
             end
           end
         end
@@ -512,10 +529,20 @@
             Rails.logger.debug("[AudioWS] Coverage unchanged — cache still valid (session=#{session.id})")
             return
           end
-          state.last_coverage_digest = fingerprint
 
-          state.cached_coverage_text = injector.injection_text
+          # Compute the full text while still on the background thread (DB query + serialization).
+          text    = injector.injection_text
           elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC, :millisecond) - started
+
+          # Assign both values atomically on the EM thread so on_input_transcription
+          # never sees a new digest paired with stale text. Without this, a GVL preemption
+          # between the two assignments lets the EM thread inject old text under the new
+          # digest — and the fresh text is then permanently skipped (C1 in audit report).
+          EM.schedule do
+            state.last_coverage_digest = fingerprint
+            state.cached_coverage_text = text
+          end
+
           Rails.logger.warn("[AudioWS] Coverage cache refresh slow: #{elapsed}ms (session=#{session.id})") if elapsed > 50
           Rails.logger.debug("[AudioWS] Coverage cache refreshed in #{elapsed}ms")
         rescue StandardError => e
@@ -537,6 +564,11 @@
         def check_coverage_complete(session, state, browser_ws)
           return if state.ending_scheduled
 
+          # Set flag IMMEDIATELY on EM thread to prevent duplicate scheduling.
+          # Previously this was set inside Thread.new via EM.schedule, leaving a
+          # window where a second callback could pass the guard (H1 fix).
+          state.ending_scheduled = true
+
           gemini_ref = state.gemini_client
 
           # Move the DB query off the EM thread — CoverageMap.exists? can take
@@ -545,23 +577,33 @@
             ActiveRecord::Base.connection_pool.with_connection do
               uncovered = CoverageMap.where(session_id: session.id, is_discovered: false)
                                     .where.not(state: 'covered').exists?
-              next if uncovered
 
-              # Flag on EM thread to prevent duplicate scheduling
-              EM.schedule { state.ending_scheduled = true }
+              if uncovered
+                # Not all covered yet — reset the flag so future checks proceed.
+                EM.schedule { state.ending_scheduled = false }
+                next
+              end
 
-              sleep(5)
-
-              next if session.reload.ended?
-
-              Sessions::EndHandler.new(session).call(reason: 'coverage_complete')
+              # H3 fix: EM timer instead of sleep(5) — cancellable and doesn't
+              # hold a thread. Give the AI 5s to wrap up naturally.
               EM.schedule do
-                send_json(browser_ws, type: 'session_ended', reason: 'coverage_complete')
-                gemini_ref&.close
-                begin
-                  browser_ws.close
-                rescue StandardError
-                  nil
+                state.coverage_end_timer = EM::Timer.new(5) do
+                  Thread.new do
+                    ActiveRecord::Base.connection_pool.with_connection do
+                      next if session.reload.ended?
+
+                      Sessions::EndHandler.new(session).call(reason: 'coverage_complete')
+                      EM.schedule do
+                        send_json(browser_ws, type: 'session_ended', reason: 'coverage_complete')
+                        gemini_ref&.close
+                        begin
+                          browser_ws.close
+                        rescue StandardError
+                          nil
+                        end
+                      end
+                    end
+                  end
                 end
               end
             end
@@ -578,37 +620,46 @@
           remaining = limit - elapsed
 
           if remaining <= 0
+            # Only mark :ceiling as sent if inject_context actually delivered it.
+            # If the silence pump is active, inject_context returns false and the
+            # warning will be retried on the next transcription event (C2 fix).
             unless state.sent_time_warnings.include?(:ceiling)
-              state.sent_time_warnings.add(:ceiling)
-              gemini_client.inject_context('[TIME CONTROL — DO NOT SPEAK THIS] { "time_warning": true, "wrap_up": true }')
+              if gemini_client.inject_context('[TIME CONTROL — DO NOT SPEAK THIS] { "time_warning": true, "wrap_up": true }')
+                state.sent_time_warnings.add(:ceiling)
+              end
             end
 
             state.ending_scheduled = true
 
-            Thread.new do
-              sleep(60)
+            # H3 fix: EM timer instead of Thread.new+sleep — cancellable and
+            # doesn't hold a thread for 60s. Thread.new only lives as long as
+            # the DB call takes.
+            state.time_ceiling_timer = EM::Timer.new(60) do
+              Thread.new do
+                ActiveRecord::Base.connection_pool.with_connection do
+                  next if session.reload.ended?
 
-              ActiveRecord::Base.connection_pool.with_connection do
-                next if session.reload.ended?
-
-                Sessions::EndHandler.new(session).call(reason: 'time_ceiling')
-                EM.schedule do
-                  send_json(browser_ws, type: 'session_ended', reason: 'time_ceiling')
-                  gemini_client&.close
-                  begin
-                    browser_ws.close
-                  rescue StandardError
-                    nil
+                  Sessions::EndHandler.new(session).call(reason: 'time_ceiling')
+                  EM.schedule do
+                    send_json(browser_ws, type: 'session_ended', reason: 'time_ceiling')
+                    gemini_client&.close
+                    begin
+                      browser_ws.close
+                    rescue StandardError
+                      nil
+                    end
                   end
                 end
               end
             end
           elsif remaining <= 60 && !state.sent_time_warnings.include?(:warn_60)
-            state.sent_time_warnings.add(:warn_60)
-            gemini_client.inject_context('[TIME CONTROL — DO NOT SPEAK THIS] { "wrap_up": true }')
+            if gemini_client.inject_context('[TIME CONTROL — DO NOT SPEAK THIS] { "wrap_up": true }')
+              state.sent_time_warnings.add(:warn_60)
+            end
           elsif remaining <= 120 && !state.sent_time_warnings.include?(:warn_120)
-            state.sent_time_warnings.add(:warn_120)
-            gemini_client.inject_context('[TIME CONTROL — DO NOT SPEAK THIS] { "time_warning": true }')
+            if gemini_client.inject_context('[TIME CONTROL — DO NOT SPEAK THIS] { "time_warning": true }')
+              state.sent_time_warnings.add(:warn_120)
+            end
           end
         end
 
@@ -665,7 +716,9 @@
                         :model_speaking, :last_coverage_digest,
                         :sent_time_warnings, :ai_audio_chunks,
                         :cached_coverage_text, :last_injected_digest,
-                        :logged_gate_suppressed, :full_reconnect_pending
+                        :logged_gate_suppressed, :full_reconnect_pending,
+                        :graceful_end_timer, :time_ceiling_timer,
+                        :coverage_end_timer
 
           def initialize
             @turn_counter = 0

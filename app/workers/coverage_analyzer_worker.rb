@@ -21,7 +21,10 @@ class CoverageAnalyzerWorker
     advance_stale_partials(session, exclude_ids: updated_ids)
 
     publish_coverage_update(session)
-    check_session_end_conditions(session)
+    # Session-end detection removed from worker (H1 fix) — the middleware owns
+    # session lifecycle because it's the only component with access to both the
+    # Gemini client and the browser WebSocket. The worker updating DB state and
+    # the middleware checking it on the next AI turn avoids the duplicate-end race.
 
     Rails.logger.info("[N7] Coverage analyzed for session #{session_id}, turn #{turn_number}")
   rescue ActiveRecord::RecordNotFound
@@ -70,8 +73,9 @@ class CoverageAnalyzerWorker
       discovered: discovered.map { |m| coverage_json(m) }
     }.to_json
 
-    redis = Redis.new(url: ENV.fetch('REDIS_URL', 'redis://localhost:6379/1'))
-    redis.publish("coverage:#{session.id}", payload)
+    # H5 fix: use Sidekiq's pooled Redis connection instead of creating
+    # a new (leaked) connection on every publish.
+    Sidekiq.redis { |conn| conn.publish("coverage:#{session.id}", payload) }
   rescue => e
     Rails.logger.error("[N7] Failed to publish coverage update: #{e.message}")
   end
@@ -92,18 +96,6 @@ class CoverageAnalyzerWorker
     scope.each do |map|
       map.update!(state: 'covered', last_signal: 'Auto-advanced: outside context window with sufficient probes')
       Rails.logger.info("[N7] Auto-advanced #{map.skill_label} to covered (probe_count=#{map.probe_count})")
-    end
-  end
-
-  def check_session_end_conditions(session)
-    return if session.reload.ended?
-
-    configured = session.coverage_maps.configured
-    all_covered = configured.exists? && !configured.where.not(state: 'covered').exists?
-
-    if all_covered
-      Rails.logger.info("[N7] All skills covered for session #{session.id} — triggering auto-end")
-      Sessions::EndHandler.new(session).call(reason: 'all_covered')
     end
   end
 

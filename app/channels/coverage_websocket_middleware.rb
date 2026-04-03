@@ -26,6 +26,8 @@ class CoverageWebSocketMiddleware
   def handle_coverage_websocket(env, session_id)
     ws = Faye::WebSocket.new(env, nil, ping: 30)
 
+    redis_sub = nil  # track subscription Redis instance for cleanup
+
     ws.on :open do |_event|
       session, error = authenticate_assessor(env, session_id)
 
@@ -39,11 +41,14 @@ class CoverageWebSocketMiddleware
       send_current_state(ws, session)
 
       # Subscribe to Redis pub/sub for live updates
-      subscribe_to_coverage_updates(ws, session_id)
+      redis_sub = subscribe_to_coverage_updates(ws, session_id)
     end
 
     ws.on :close do |_event|
       Rails.logger.debug("[CoverageWS] Assessor disconnected from session #{session_id}")
+      # H4 fix: unsubscribe so the blocking Thread exits cleanly instead of
+      # hanging forever waiting for the next message.
+      Thread.new { redis_sub&.unsubscribe rescue nil }
     end
 
     ws.rack_response
@@ -67,12 +72,12 @@ class CoverageWebSocketMiddleware
     Rails.logger.error("[CoverageWS] Failed to send initial state: #{e.message}")
   end
 
+  # Returns the Redis instance so the caller can unsubscribe on WS close.
   def subscribe_to_coverage_updates(ws, session_id)
     channel = "coverage:#{session_id}"
+    redis = Redis.new(url: ENV.fetch('REDIS_URL', 'redis://localhost:6379/1'))
 
     Thread.new do
-      redis = Redis.new(url: ENV.fetch('REDIS_URL', 'redis://localhost:6379/1'))
-
       redis.subscribe(channel) do |on|
         on.message do |_channel, message|
           EM.schedule do
@@ -86,6 +91,8 @@ class CoverageWebSocketMiddleware
     rescue => e
       Rails.logger.error("[CoverageWS] Redis subscription error for #{channel}: #{e.message}")
     end
+
+    redis
   end
 
   def authenticate_assessor(env, session_id)

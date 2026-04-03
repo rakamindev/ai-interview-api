@@ -156,8 +156,10 @@ module Gemini
     #
     # The system prompt instructs the AI not to respond to these injections.
     # If it briefly tries, the candidate's ongoing audio interrupts it.
+    # Returns true if the injection was sent, false if it was skipped.
+    # Callers that need guaranteed delivery should retry on false.
     def inject_context(text)
-      return unless @connected && @ws
+      return false unless @connected && @ws
 
       # Don't inject while audio is in flight in either direction:
       #   - @model_emitting_audio: AI is generating — would queue a second response
@@ -165,7 +167,7 @@ module Gemini
       #     with realtimeInput causes a 1008 protocol violation from Gemini
       if @model_emitting_audio || @silence_pumping
         Rails.logger.debug("[Gemini::LiveClient] inject_context skipped — model_emitting=#{@model_emitting_audio} silence_pumping=#{@silence_pumping}")
-        return
+        return false
       end
 
       message = {
@@ -179,6 +181,7 @@ module Gemini
       }
 
       @ws.send(message.to_json)
+      true
     end
 
     # Sends an empty client turn to prompt Gemini to speak first.
