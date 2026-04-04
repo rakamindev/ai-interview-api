@@ -32,6 +32,11 @@ gem 'faye-websocket'
 gem 'faraday', '~> 2.0'
 gem 'faraday-retry'
 
+# Google Cloud services (auth + STT + TTS)
+gem 'googleauth', '~> 1.0'
+gem 'google-cloud-speech-v2', '~> 1.0'
+gem 'google-cloud-text_to_speech', '~> 1.0'
+
 # PDF generation
 gem 'matrix' # required by prawn on Ruby >= 3.1
 gem 'prawn', '~> 2.4'
