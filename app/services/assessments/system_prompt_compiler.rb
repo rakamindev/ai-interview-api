@@ -127,10 +127,12 @@ module Assessments
         not_yet — you haven't touched this skill yet. Start here.
         initiated — you asked one question. You MUST probe at least once more.
         partial — you've probed but signal is still thin. Go deeper.
-        covered — you have enough signal. Move on naturally.
-        discovered — candidate mentioned this unprompted. Probe briefly (2-3 exchanges), then return to agenda.
+        covered — STOP probing this skill. You have enough signal. Do NOT ask any more questions about it.
+        discovered — candidate mentioned this unprompted. Probe briefly (2-3 exchanges max), then return to agenda.
 
-        Priority: not_yet > initiated > partial > discovered > covered
+        CRITICAL RULE: Never ask questions about a skill that is already "covered". Move to the next uncovered skill immediately.
+
+        Priority: not_yet > initiated > partial > discovered > covered (never probe)
 
         The coverage map is injected as a JSON block before each of your responses (hidden from candidate).
         It looks like:

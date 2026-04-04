@@ -490,21 +490,21 @@
                   "[#{label}]: #{t.text}"
                 end.join("\n")
 
-                header = '[SESSION RESUME — do not acknowledge this message]'
-                context = "#{header}\nConversation so far:\n\n#{history}\n\nContinue the interview from where it left off."
+                header = '[SESSION RESUME — do not acknowledge this message, do not greet, do not introduce yourself]'
+                context = "#{header}\n" \
+                          "This interview is already in progress. Here is the conversation so far:\n\n" \
+                          "#{history}\n\n" \
+                          "You MUST continue from where the conversation left off. " \
+                          'Do NOT start over. Do NOT ask your opening question again.'
 
                 sid = session.id
                 Rails.logger.info("[AudioWS] Injecting #{turns.size} turns for full reconnect (session=#{sid}, last=#{last_speaker})")
                 EM.schedule do
                   if last_speaker == 'ai'
-                    # AI already asked a question — inject as supplemental context
-                    # (turnComplete: false) so Gemini doesn't re-ask. The candidate's
-                    # audio will naturally complete the open turn via VAD.
                     gemini&.inject_context(context, turn_complete: false)
                     state.model_speaking = false
                     send_json(browser_ws, type: 'speaker_changed', speaker: 'candidate')
                   else
-                    # Candidate spoke last — prompt AI to continue (turnComplete: true)
                     gemini&.inject_context(context)
                   end
                 end
@@ -513,6 +513,13 @@
                 Rails.logger.info("[AudioWS] Full reconnect with no transcript (session=#{sid})")
                 EM.schedule { gemini&.trigger_opening }
               end
+            end
+          rescue StandardError => e
+            Rails.logger.error("[AudioWS] restore_conversation_context failed: #{e.class}: #{e.message}")
+            # Ungate the mic so the candidate isn't stuck in silence
+            EM.schedule do
+              state.model_speaking = false
+              send_json(browser_ws, type: 'speaker_changed', speaker: 'candidate')
             end
           end
         end
