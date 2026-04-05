@@ -81,8 +81,11 @@ module Gemini
 
     # Opens the WebSocket connection to Gemini Live and sends the setup message.
     # If resumption_handle is provided, resumes a previous session.
-    def connect(resumption_handle: nil)
+    # If seed_history is true, setup includes historyConfig so clientContent
+    # can be used to seed conversation context (Gemini 3.1 requirement).
+    def connect(resumption_handle: nil, seed_history: false)
       @awaiting_session_resumption = resumption_handle.present?
+      @seed_history = seed_history
       @setup_complete = false
       @resumption_received = false
 
@@ -398,7 +401,39 @@ module Gemini
         }
       }
 
+      # Gemini 3.1: when seeding history, the server waits for clientContent
+      # messages before starting the realtime conversation.
+      if @seed_history
+        setup[:setup][:historyConfig] = { initialHistoryInClientContent: true }
+      end
+
       @ws.send(setup.to_json)
+    end
+
+    public
+
+    # Seeds conversation history via clientContent (Gemini 3.1).
+    # Only works when setup included historyConfig.initialHistoryInClientContent.
+    # Sends alternating user/model turns, then closes with turnComplete: true.
+    def seed_conversation_history(turns)
+      return unless @connected && @ws && turns.any?
+
+      turns.each do |turn|
+        message = {
+          clientContent: {
+            turns: [{
+              role: turn[:role],
+              parts: [{ text: turn[:text] }]
+            }],
+            turnComplete: false
+          }
+        }
+        @ws.send(message.to_json)
+      end
+
+      # Close the history — signals Gemini to start the realtime conversation
+      @ws.send({ clientContent: { turnComplete: true } }.to_json)
+      Rails.logger.info("[Gemini::LiveClient] Seeded #{turns.size} history turns")
     end
 
     def handle_message(raw_data)

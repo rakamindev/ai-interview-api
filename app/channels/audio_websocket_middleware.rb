@@ -164,22 +164,15 @@
               turn_number = state.increment_turn!
               gemini_ref  = state.gemini_client
 
-              # Only inject coverage during GENUINE user turns (model_speaking=false).
-              # on_input_transcription also fires from generationComplete when Gemini
-              # flushes the input buffer mid-model-turn. If we inject coverage at
-              # that point, the clientContent (turnComplete:true) triggers a SECOND
-              # Gemini response — the "dual AI voice" bug. The rapid speaker_changed
-              # toggling then breaks the frontend mic gate.
+              # Inject coverage map via realtimeInput.text.
+              # On Gemini 3.1, this can be sent anytime — no guards needed.
+              # No dual-voice risk, no 1008, no empty generations.
               current_digest = state.last_coverage_digest
-              if !state.model_speaking &&
-                 state.cached_coverage_text.present? &&
+              if state.cached_coverage_text.present? &&
                  current_digest != state.last_injected_digest
-                if gemini_ref.inject_context(state.cached_coverage_text)
-                  state.last_injected_digest = current_digest
-                  Rails.logger.debug("[AudioWS] Coverage injected (digest=#{current_digest&.slice(0, 8)})")
-                else
-                  Rails.logger.debug('[AudioWS] Coverage injection skipped — will retry next turn')
-                end
+                gemini_ref.inject_context(state.cached_coverage_text)
+                state.last_injected_digest = current_digest
+                Rails.logger.debug("[AudioWS] Coverage injected (digest=#{current_digest&.slice(0, 8)})")
               end
 
               # Push DB writes off the EM thread so we don't stall audio forwarding.
@@ -203,10 +196,11 @@
               next unless text.present?
 
               # Strip coverage/time metadata that leaks into output transcription.
-              # Gemini 3.1's realtimeInput.text echoes the raw JSON (without our tags)
-              # in outputTranscription. Match the JSON pattern and remove it.
-              text = text.sub(/\A\s*\{[^}]*"skills"\s*:.*?"time_remaining_minutes"\s*:\s*\d+\s*\}\s*/m, '').strip
+              # Gemini 3.1's realtimeInput.text content echoes in outputTranscription.
+              text = text.gsub(/\[COVERAGE_MAP\].*?\[\/COVERAGE_MAP\]/m, '').strip
+              text = text.gsub(/\{[^}]*"skills"\s*:.*?"time_remaining_minutes"\s*:\s*\d+\s*\}/m, '').strip
               text = text.gsub(/\[TIME CONTROL[^\]]*\][^\n]*/m, '').strip
+              text = text.gsub(/\[Start the interview[^\]]*\]/m, '').strip
               next unless text.present?
 
               turn_number = state.increment_turn!
@@ -378,7 +372,7 @@
               state.gemini_client&.supersede!
               build_gemini_client(browser_ws, state)
               token = resumption_failed ? nil : (state.latest_resumption_token || state.session.gemini_resumption_token.presence)
-              state.gemini_client.connect(resumption_handle: token)
+              state.gemini_client.connect(resumption_handle: token, seed_history: resumption_failed)
             end
           else
             Rails.logger.error("[AudioWS] Gemini reconnection failed after #{MAX_RECONNECT_ATTEMPTS} attempts")
@@ -475,14 +469,13 @@
         end
 
         # On a full reconnect (resumption token expired/failed), Gemini has no
-        # conversation history and would restart the interview from scratch.
-        # Inject the last N transcript turns so it can continue naturally.
+        # conversation history. Seed it via clientContent (Gemini 3.1 historyConfig).
+        # This is the proper way to restore context — Gemini treats these as
+        # actual conversation history, not as new user input.
         def restore_conversation_context(browser_ws, state)
           session = state.session
           gemini  = state.gemini_client
 
-          # Gate candidate audio BEFORE the injection — the AI will respond
-          # to the history context and we don't want candidate audio colliding.
           state.model_speaking = true
           send_json(browser_ws, type: 'speaker_changed', speaker: 'ai')
 
@@ -492,28 +485,24 @@
 
               if turns.any?
                 last_speaker = turns.last.speaker
-                history = turns.map do |t|
-                  label = t.speaker == 'ai' ? 'Interviewer' : 'Candidate'
-                  "[#{label}]: #{t.text}"
-                end.join("\n")
-
-                header = '[SESSION RESUME — do not acknowledge this message, do not greet, do not introduce yourself]'
-                context = "#{header}\n" \
-                          "This interview is already in progress. Here is the conversation so far:\n\n" \
-                          "#{history}\n\n" \
-                          "You MUST continue from where the conversation left off. " \
-                          'Do NOT start over. Do NOT ask your opening question again.'
+                history_turns = turns.map do |t|
+                  { role: t.speaker == 'ai' ? 'model' : 'user', text: t.text }
+                end
 
                 sid = session.id
-                Rails.logger.info("[AudioWS] Injecting #{turns.size} turns for full reconnect (session=#{sid}, last=#{last_speaker})")
+                Rails.logger.info("[AudioWS] Seeding #{turns.size} history turns for full reconnect (session=#{sid}, last=#{last_speaker})")
+
                 EM.schedule do
+                  gemini&.seed_conversation_history(history_turns)
+
                   if last_speaker == 'ai'
-                    gemini&.inject_context(context, turn_complete: false)
+                    # AI already asked — open mic for candidate
                     state.model_speaking = false
                     send_json(browser_ws, type: 'speaker_changed', speaker: 'candidate')
-                  else
-                    gemini&.inject_context(context)
                   end
+                  # If last speaker was candidate, Gemini will respond naturally
+                  # after processing the seeded history (model_speaking stays true
+                  # until on_model_turn_complete fires).
                 end
               else
                 sid = session.id
@@ -523,7 +512,6 @@
             end
           rescue StandardError => e
             Rails.logger.error("[AudioWS] restore_conversation_context failed: #{e.class}: #{e.message}")
-            # Ungate the mic so the candidate isn't stuck in silence
             EM.schedule do
               state.model_speaking = false
               send_json(browser_ws, type: 'speaker_changed', speaker: 'candidate')
