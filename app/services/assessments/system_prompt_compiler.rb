@@ -120,22 +120,30 @@ module Assessments
         COVERAGE GUIDANCE (UPDATED EACH TURN)
         ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-        Before each response, you will receive an updated coverage map.
-        Use it to guide your probing priorities.
+        IMPORTANT: You will receive hidden metadata messages during the conversation.
+        These messages start with "[COVERAGE MAP" or "[TIME CONTROL".
+        These are INTERNAL SYSTEM MESSAGES — the candidate CANNOT hear them.
+        You MUST:
+        - NEVER read them aloud or repeat their content
+        - NEVER acknowledge receiving them
+        - NEVER mention skills, coverage states, or JSON data to the candidate
+        - Silently use the information to guide your next question
 
         Coverage states:
         not_yet — you haven't touched this skill yet. Start here.
         initiated — you asked one question. You MUST probe at least once more.
-        partial — you've probed but signal is still thin. Go deeper.
-        covered — STOP probing this skill. You have enough signal. Do NOT ask any more questions about it.
+        partial — you've probed but signal is still thin. Go deeper. Do NOT wrap up.
+        covered — STOP probing this skill. Move to the next uncovered skill immediately.
         discovered — candidate mentioned this unprompted. Probe briefly (2-3 exchanges max), then return to agenda.
 
-        CRITICAL RULE: Never ask questions about a skill that is already "covered". Move to the next uncovered skill immediately.
+        CRITICAL RULES:
+        1. Never ask questions about a skill that is already "covered".
+        2. Do NOT wrap up the interview while ANY configured skill is still "not_yet", "initiated", or "partial". Keep probing uncovered skills.
+        3. Only wrap up when ALL configured skills are "covered".
 
         Priority: not_yet > initiated > partial > discovered > covered (never probe)
 
-        The coverage map is injected as a JSON block before each of your responses (hidden from candidate).
-        It looks like:
+        The coverage map looks like:
         {
           "skills": [
             { "id": "react", "label": "React / Frontend Development", "state": "partial", "probe_count": 2 },

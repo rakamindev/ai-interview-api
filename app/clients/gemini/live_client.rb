@@ -55,7 +55,7 @@ module Gemini
     )
       @system_prompt = system_prompt
       @api_key = api_key || ENV.fetch('GEMINI_API_KEY')
-      @model = model || ENV.fetch('GEMINI_LIVE_MODEL', 'gemini-2.0-flash-live-001')
+      @model = model || ENV.fetch('GEMINI_LIVE_MODEL', 'gemini-3.1-flash-live-preview')
       @voice = voice
       @resumption_token = nil
       @connected = false
@@ -136,47 +136,31 @@ module Gemini
 
       message = {
         realtimeInput: {
-          mediaChunks: [{
+          audio: {
             mimeType: 'audio/pcm;rate=16000',
             data: Base64.strict_encode64(pcm_bytes)
-          }]
+          }
         }
       }
 
       @ws.send(message.to_json)
     end
 
-    # Injects hidden context directly into Gemini's conversation flow.
+    # Injects hidden context into the conversation via realtimeInput.text.
     #
-    # Uses turnComplete: true so the text turn is self-contained and closed
-    # immediately. With turnComplete: false, Gemini opens a text turn that
-    # its VAD can never close (VAD only closes audio turns). These "dangling"
-    # turns accumulate and eventually block VAD entirely — the root cause of
-    # the stall where audio is forwarded but no inputTx fires.
+    # Gemini 3.1: clientContent is only for initial context seeding.
+    # Mid-conversation text goes via realtimeInput.text — same channel as
+    # audio, so no interleaving conflicts, no turnComplete dilemma,
+    # no 1008 protocol violations.
     #
-    # The system prompt instructs the AI not to respond to these injections.
-    # If it briefly tries, the candidate's ongoing audio interrupts it.
-    # Returns true if the injection was sent, false if it was skipped.
-    # Callers that need guaranteed delivery should retry on false.
-    def inject_context(text, turn_complete: true)
+    # Per the API docs: "Can be sent continuously without interruption
+    # to model generation" — no guards needed.
+    def inject_context(text, turn_complete: true) # turn_complete kept for interface compat, ignored
       return false unless @connected && @ws
 
-      # Don't inject while audio is in flight in either direction:
-      #   - @model_emitting_audio: AI is generating — would queue a second response
-      #   - @silence_pumping: realtimeInput stream is active — interleaving clientContent
-      #     with realtimeInput causes a 1008 protocol violation from Gemini
-      if @model_emitting_audio || @silence_pumping
-        Rails.logger.debug("[Gemini::LiveClient] inject_context skipped — model_emitting=#{@model_emitting_audio} silence_pumping=#{@silence_pumping}")
-        return false
-      end
-
       message = {
-        clientContent: {
-          turns: [{
-            role: 'user',
-            parts: [{ text: text }]
-          }],
-          turnComplete: turn_complete
+        realtimeInput: {
+          text: text
         }
       }
 
@@ -184,19 +168,15 @@ module Gemini
       true
     end
 
-    # Sends an empty client turn to prompt Gemini to speak first.
-    # Called after setupComplete so the AI delivers the opening question
-    # without waiting for candidate audio.
+    # Prompts Gemini to speak first via realtimeInput.text.
+    # Gemini 3.1: clientContent is only for initial context seeding.
+    # Mid-session prompts go via realtimeInput.text.
     def trigger_opening
       return unless @connected && @ws
 
       message = {
-        clientContent: {
-          turns: [{
-            role: 'user',
-            parts: [{ text: '' }]
-          }],
-          turnComplete: true
+        realtimeInput: {
+          text: '[Start the interview. Greet the candidate and ask your first question.]'
         }
       }
 
@@ -252,13 +232,12 @@ module Gemini
     #      within natural intra-sentence pause range, sending spurious silence
     #      that confuses Gemini's VAD)
     def schedule_silence_pump
-      # Always stop the periodic pump if running — real audio arrived, silence must stop.
+      # Silence pump re-enabled for Gemini 3.1.
+      # Default VAD still doesn't detect end-of-speech from browser silence gaps.
       stop_silence_pump if @silence_pumping
 
-      # Track when real audio last arrived — cheap, no timer allocation.
       @last_real_audio_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 
-      # Only create one pending timer; it will self-check on fire.
       return if @silence_pump_timer
 
       @silence_pump_timer = EM::Timer.new(SILENCE_PUMP_DELAY) do
@@ -295,10 +274,10 @@ module Gemini
 
       silence_msg = {
         realtimeInput: {
-          mediaChunks: [{
+          audio: {
             mimeType: 'audio/pcm;rate=16000',
             data: Base64.strict_encode64(SILENCE_FRAME)
-          }]
+          }
         }
       }.to_json.freeze
 
@@ -400,13 +379,16 @@ module Gemini
           systemInstruction: {
             parts: [{ text: @system_prompt }]
           },
-          realtimeInputConfig: {
-            automaticActivityDetection: {
-              startOfSpeechSensitivity: 'START_SENSITIVITY_LOW',
-              endOfSpeechSensitivity: 'END_SENSITIVITY_HIGH',
-              silenceDurationMs: 500
-            }
-          },
+          # realtimeInputConfig removed (gemini-3.1 experiment).
+          # Gemini 3.1's default VAD should handle silence detection.
+          # If needed, re-enable with:
+          # realtimeInputConfig: {
+          #   automaticActivityDetection: {
+          #     startOfSpeechSensitivity: 'START_SENSITIVITY_LOW',
+          #     endOfSpeechSensitivity: 'END_SENSITIVITY_HIGH',
+          #     silenceDurationMs: 500
+          #   }
+          # },
           inputAudioTranscription: {},
           outputAudioTranscription: {},
           contextWindowCompression: {

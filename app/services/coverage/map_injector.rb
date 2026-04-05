@@ -30,7 +30,7 @@ module Coverage
         priority_next:          priority_next(configured)
       }
 
-      "[COVERAGE MAP — DO NOT SPEAK THIS]\n#{payload.to_json}"
+      "[COVERAGE MAP — INTERNAL SYSTEM DATA — DO NOT READ ALOUD — DO NOT ACKNOWLEDGE]\n#{payload.to_json}"
     end
 
     private
