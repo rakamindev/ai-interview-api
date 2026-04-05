@@ -162,13 +162,15 @@
               next unless text.present?
 
               turn_number = state.increment_turn!
-              gemini_ref  = state.gemini_client
+              gemini_ref = state.gemini_client
 
-              # Inject coverage map via realtimeInput.text.
-              # On Gemini 3.1, this can be sent anytime — no guards needed.
-              # No dual-voice risk, no 1008, no empty generations.
+              # Only inject coverage during GENUINE candidate turns (model_speaking=false).
+              # on_input_transcription also fires from generationComplete when Gemini
+              # flushes the input buffer mid-model-turn. Injecting then triggers a
+              # second AI response (the dual-response bug).
               current_digest = state.last_coverage_digest
-              if state.cached_coverage_text.present? &&
+              if !state.model_speaking &&
+                 state.cached_coverage_text.present? &&
                  current_digest != state.last_injected_digest
                 gemini_ref.inject_context(state.cached_coverage_text)
                 state.last_injected_digest = current_digest
@@ -197,7 +199,10 @@
 
               # Strip coverage/time metadata that leaks into output transcription.
               # Gemini 3.1's realtimeInput.text content echoes in outputTranscription.
-              text = text.gsub(/\[COVERAGE_MAP\].*?\[\/COVERAGE_MAP\]/m, '').strip
+              # Gemini may transform tags (underscores → spaces, strip closing tags).
+              # Match all variants: [COVERAGE_MAP], [COVERAGE MAP], [COVERAGE MAP:], etc.
+              text = text.gsub(/\[COVERAGE[_ ]MAP[^\]]*\].*?\[\/COVERAGE[_ ]MAP\]/m, '').strip
+              text = text.gsub(/\[COVERAGE[_ ]MAP[^\]]*\]/m, '').strip
               text = text.gsub(/\{[^}]*"skills"\s*:.*?"time_remaining_minutes"\s*:\s*\d+\s*\}/m, '').strip
               text = text.gsub(/\[TIME CONTROL[^\]]*\][^\n]*/m, '').strip
               text = text.gsub(/\[Start the interview[^\]]*\]/m, '').strip
@@ -276,11 +281,6 @@
               else
                 Rails.logger.info("[AudioWS] Gemini ready — sending session_started for session #{session.id}")
                 unless session.gemini_resumption_token.present?
-                  # Gate candidate audio BEFORE trigger_opening so the browser's
-                  # mic input doesn't reach Gemini and interrupt the AI's opening
-                  # response before it produces any audio. Without this, the
-                  # realtimeInput frames cause Gemini to abort generation → empty
-                  # generationComplete → no AI response at all.
                   state.model_speaking = true
                   send_json(browser_ws, type: 'speaker_changed', speaker: 'ai')
                   state.gemini_client.trigger_opening
@@ -372,7 +372,7 @@
               state.gemini_client&.supersede!
               build_gemini_client(browser_ws, state)
               token = resumption_failed ? nil : (state.latest_resumption_token || state.session.gemini_resumption_token.presence)
-              state.gemini_client.connect(resumption_handle: token, seed_history: resumption_failed)
+              state.gemini_client.connect(resumption_handle: token)
             end
           else
             Rails.logger.error("[AudioWS] Gemini reconnection failed after #{MAX_RECONNECT_ATTEMPTS} attempts")
@@ -468,42 +468,26 @@
           end
         end
 
-        # On a full reconnect (resumption token expired/failed), Gemini has no
-        # conversation history. Seed it via clientContent (Gemini 3.1 historyConfig).
-        # This is the proper way to restore context — Gemini treats these as
-        # actual conversation history, not as new user input.
+        # On a full reconnect, inject conversation history via realtimeInput.text.
+        # The AI may re-ask the last question — accepted tradeoff on 3.1.
         def restore_conversation_context(browser_ws, state)
           session = state.session
           gemini  = state.gemini_client
-
-          state.model_speaking = true
-          send_json(browser_ws, type: 'speaker_changed', speaker: 'ai')
 
           Thread.new do
             ActiveRecord::Base.connection_pool.with_connection do
               turns = session.transcript_turns.ordered.last(12)
 
               if turns.any?
-                last_speaker = turns.last.speaker
-                history_turns = turns.map do |t|
-                  { role: t.speaker == 'ai' ? 'model' : 'user', text: t.text }
-                end
+                history = turns.map do |t|
+                  label = t.speaker == 'ai' ? 'Interviewer' : 'Candidate'
+                  "[#{label}]: #{t.text}"
+                end.join("\n")
 
+                context = "[SESSION RESUME] Continue from where the interview left off.\n\n#{history}"
                 sid = session.id
-                Rails.logger.info("[AudioWS] Seeding #{turns.size} history turns for full reconnect (session=#{sid}, last=#{last_speaker})")
-
-                EM.schedule do
-                  gemini&.seed_conversation_history(history_turns)
-
-                  if last_speaker == 'ai'
-                    # AI already asked — open mic for candidate
-                    state.model_speaking = false
-                    send_json(browser_ws, type: 'speaker_changed', speaker: 'candidate')
-                  end
-                  # If last speaker was candidate, Gemini will respond naturally
-                  # after processing the seeded history (model_speaking stays true
-                  # until on_model_turn_complete fires).
-                end
+                Rails.logger.info("[AudioWS] Injecting #{turns.size} turns for full reconnect (session=#{sid})")
+                EM.schedule { gemini&.inject_context(context) }
               else
                 sid = session.id
                 Rails.logger.info("[AudioWS] Full reconnect with no transcript (session=#{sid})")
@@ -692,7 +676,7 @@
                         :cached_coverage_text, :last_injected_digest,
                         :logged_gate_suppressed, :full_reconnect_pending,
                         :graceful_end_timer, :time_ceiling_timer,
-                        :coverage_end_timer
+                        :coverage_end_timer, :coverage_pending
 
           def initialize
             @turn_counter = 0

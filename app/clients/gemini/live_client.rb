@@ -172,8 +172,6 @@ module Gemini
     end
 
     # Prompts Gemini to speak first via realtimeInput.text.
-    # Gemini 3.1: clientContent is only for initial context seeding.
-    # Mid-session prompts go via realtimeInput.text.
     def trigger_opening
       return unless @connected && @ws
 
@@ -184,6 +182,7 @@ module Gemini
       }
 
       @ws.send(message.to_json)
+      Rails.logger.info('[Gemini::LiveClient] trigger_opening sent')
     end
 
     # Returns true if this client is ready to accept audio frames.
@@ -401,11 +400,9 @@ module Gemini
         }
       }
 
-      # Gemini 3.1: when seeding history, the server waits for clientContent
-      # messages before starting the realtime conversation.
-      if @seed_history
-        setup[:setup][:historyConfig] = { initialHistoryInClientContent: true }
-      end
+      # historyConfig removed — clientContent-based history seeding didn't work
+      # reliably (trigger_opening failed to get a response). Using realtimeInput.text
+      # for everything instead. Tradeoff: AI may re-ask on full reconnect.
 
       @ws.send(setup.to_json)
     end
