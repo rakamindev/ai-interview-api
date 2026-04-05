@@ -17,7 +17,7 @@ module Coverage
       Digest::MD5.hexdigest(maps.map { |m| "#{m.id}:#{m.state}:#{m.probe_count}" }.join(','))
     end
 
-    # Returns the formatted injection string to send as clientContent to Gemini.
+    # Returns the formatted injection string to send via realtimeInput.text.
     def injection_text
       maps = @session.coverage_maps.includes(:session)
       configured = maps.configured.order(:id)
@@ -30,7 +30,7 @@ module Coverage
         priority_next:          priority_next(configured)
       }
 
-      "[COVERAGE MAP — INTERNAL SYSTEM DATA — DO NOT READ ALOUD — DO NOT ACKNOWLEDGE]\n#{payload.to_json}"
+      "[COVERAGE_MAP]\n#{payload.to_json}\n[/COVERAGE_MAP]"
     end
 
     private

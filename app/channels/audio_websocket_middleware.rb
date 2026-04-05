@@ -202,6 +202,13 @@
             on_output_transcription: lambda { |text|
               next unless text.present?
 
+              # Strip coverage/time metadata that leaks into output transcription.
+              # Gemini 3.1's realtimeInput.text echoes the raw JSON (without our tags)
+              # in outputTranscription. Match the JSON pattern and remove it.
+              text = text.sub(/\A\s*\{[^}]*"skills"\s*:.*?"time_remaining_minutes"\s*:\s*\d+\s*\}\s*/m, '').strip
+              text = text.gsub(/\[TIME CONTROL[^\]]*\][^\n]*/m, '').strip
+              next unless text.present?
+
               turn_number = state.increment_turn!
 
               Thread.new do
