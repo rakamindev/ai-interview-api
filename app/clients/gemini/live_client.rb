@@ -400,13 +400,15 @@ module Gemini
           systemInstruction: {
             parts: [{ text: @system_prompt }]
           },
-          realtimeInputConfig: {
-            automaticActivityDetection: {
-              startOfSpeechSensitivity: 'START_SENSITIVITY_LOW',
-              endOfSpeechSensitivity: 'END_SENSITIVITY_HIGH',
-              silenceDurationMs: 500
-            }
-          },
+          # Disable for experiments (Default VAD + pumping silence)
+          # Current Problem found: AI answering itself, maybe caused by racing of context injection
+          # realtimeInputConfig: {
+          #   automaticActivityDetection: {
+          #     startOfSpeechSensitivity: 'START_SENSITIVITY_LOW',
+          #     endOfSpeechSensitivity: 'END_SENSITIVITY_HIGH',
+          #     silenceDurationMs: 500
+          #   }
+          # },
           inputAudioTranscription: {},
           outputAudioTranscription: {},
           contextWindowCompression: {
