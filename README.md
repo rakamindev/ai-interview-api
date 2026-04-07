@@ -44,6 +44,7 @@ bundle install
 ```bash
 rails db:create   # skip if DB already exists
 rails db:migrate
+rails db:seed
 ```
 
 ---
