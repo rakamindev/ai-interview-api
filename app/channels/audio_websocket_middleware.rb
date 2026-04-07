@@ -201,11 +201,14 @@
               # Gemini 3.1's realtimeInput.text content echoes in outputTranscription.
               # Gemini may transform tags (underscores → spaces, strip closing tags).
               # Match all variants: [COVERAGE_MAP], [COVERAGE MAP], [COVERAGE MAP:], etc.
-              text = text.gsub(/\[COVERAGE[_ ]MAP[^\]]*\].*?\[\/COVERAGE[_ ]MAP\]/m, '').strip
+              text = text.gsub(%r{\[COVERAGE[_ ]MAP[^\]]*\].*?\[/COVERAGE[_ ]MAP\]}m, '').strip
               text = text.gsub(/\[COVERAGE[_ ]MAP[^\]]*\]/m, '').strip
               text = text.gsub(/\{[^}]*"skills"\s*:.*?"time_remaining_minutes"\s*:\s*\d+\s*\}/m, '').strip
+              text = text.gsub(/.*"time_remaining_minutes"\s*:\s*\d+\s*\}\]?\s*/m, '').strip
               text = text.gsub(/\[TIME CONTROL[^\]]*\][^\n]*/m, '').strip
               text = text.gsub(/\[Start the interview[^\]]*\]/m, '').strip
+              text = text.gsub(/\[SESSION RESUME\][^\n]*/m, '').strip
+              text = text.gsub(/\[SISTEM\][^\n]*/m, '').strip
               next unless text.present?
 
               turn_number = state.increment_turn!
