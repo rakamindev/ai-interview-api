@@ -214,8 +214,8 @@
               # the candidate stops talking after the AI's closing statement.
               check_time_ceiling(session, state, browser_ws)
 
-              # Auto-end when all configured skills are covered (AI concluded naturally)
-              check_coverage_complete(session, state, browser_ws)
+              # Auto-end disabled — session ends via manual action or time ceiling.
+              # check_coverage_complete removed (coverage_complete reason bug + timing issues)
             },
 
             # Fires after the model's turnComplete — all audio frames have been sent,

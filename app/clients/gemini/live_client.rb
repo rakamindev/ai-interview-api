@@ -151,27 +151,13 @@ module Gemini
     end
 
     # Injects hidden context directly into Gemini's conversation flow.
-    #
-    # EXPERIMENT (experiment/remove-vad-config): Reverted to turnComplete: false.
-    # With the custom realtimeInputConfig removed, Gemini's default turn
-    # management should treat this as supplemental context — not a standalone
-    # turn that needs closing. See tech-docs/report/turncomplete-dilemma.md.
-    #
-    # Previously used turnComplete: true which prevented dangling turns but
-    # introduced dual-voice risk and required 5 guards (model_emitting_audio,
-    # silence_pumping, model_speaking, GATE_OPEN_DELAY, model_interrupted).
-    #
-    # Returns true if the injection was sent, false if it was skipped.
-    # Callers that need guaranteed delivery should retry on false.
+    # Uses turnComplete: true with custom realtimeInputConfig.
+    # Guards prevent 1008 (silence pump interleaving) and dual-voice.
     def inject_context(text)
       return false unless @connected && @ws
 
-      # EXPERIMENT (experiment/remove-vad-config): @silence_pumping guard removed.
-      # With turnComplete: false, clientContent is supplemental context — not a
-      # standalone turn. No 1008 risk from interleaving with realtimeInput.
-      # Keeping @model_emitting_audio as a safety net for Phase 1.
-      if @model_emitting_audio
-        Rails.logger.debug("[Gemini::LiveClient] inject_context skipped — model_emitting=#{@model_emitting_audio}")
+      if @model_emitting_audio || @silence_pumping
+        Rails.logger.debug("[Gemini::LiveClient] inject_context skipped — model_emitting=#{@model_emitting_audio} silence_pumping=#{@silence_pumping}")
         return false
       end
 
@@ -181,7 +167,7 @@ module Gemini
             role: 'user',
             parts: [{ text: text }]
           }],
-          turnComplete: false
+          turnComplete: true
         }
       }
 
@@ -257,24 +243,11 @@ module Gemini
     #      within natural intra-sentence pause range, sending spurious silence
     #      that confuses Gemini's VAD)
     def schedule_silence_pump
-      # EXPERIMENT (experiment/remove-vad-config): Silence pump disabled.
-      # Without custom realtimeInputConfig, Gemini's default VAD should
-      # handle silence detection from the browser's audio stream directly.
-      # The silence pump was needed because the custom VAD required
-      # continuous silence frames that the browser doesn't send.
-      # If the experiment fails (Gemini can't detect end-of-speech),
-      # re-enable by removing this early return.
-      return
+      # Silence pump re-enabled with default VAD (no realtimeInputConfig).
+      stop_silence_pump if @silence_pumping
 
-      # Always stop the periodic pump if running — real audio arrived, silence must stop.
-      if @silence_pumping
-        stop_silence_pump
-      end
-
-      # Track when real audio last arrived — cheap, no timer allocation.
       @last_real_audio_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 
-      # Only create one pending timer; it will self-check on fire.
       return if @silence_pump_timer
 
       @silence_pump_timer = EM::Timer.new(SILENCE_PUMP_DELAY) do
@@ -417,11 +390,13 @@ module Gemini
           systemInstruction: {
             parts: [{ text: @system_prompt }]
           },
-          # realtimeInputConfig REMOVED (experiment/remove-vad-config)
-          # The original custom VAD config was never in the spec. Removing it
-          # lets Gemini use its default turn management, which may handle
-          # turnComplete: false correctly (no dangling turns). See:
-          # tech-docs/report/turncomplete-dilemma.md — "Option F"
+          realtimeInputConfig: {
+            automaticActivityDetection: {
+              startOfSpeechSensitivity: 'START_SENSITIVITY_LOW',
+              endOfSpeechSensitivity: 'END_SENSITIVITY_HIGH',
+              silenceDurationMs: 500
+            }
+          },
           inputAudioTranscription: {},
           outputAudioTranscription: {},
           contextWindowCompression: {
