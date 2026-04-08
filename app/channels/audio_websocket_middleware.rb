@@ -16,7 +16,7 @@ class AudioWebSocketMiddleware
   MAX_RECONNECT_ATTEMPTS = 3
   RECONNECT_BACKOFF = [1, 2, 4].freeze
   BROWSER_GRACE_PERIOD = 120 # seconds to keep Gemini alive after browser disconnects
-  PROACTIVE_RECONNECT_AFTER = 120  # seconds (~2 min) — reconnect before Gemini's 10-min limit
+  PROACTIVE_RECONNECT_AFTER = ENV.fetch('PROACTIVE_RECONNECT_AFTER', 510).to_i
   PROACTIVE_RECONNECT_JITTER = 30  # randomise to avoid thundering herd across concurrent sessions
   AUDIO_BUFFER_SECONDS = 60        # ring buffer capacity per session
 
