@@ -16,27 +16,16 @@ module Gemini
     # — lets frontend audio buffer drain so the mic doesn't
     # pick up the AI's speaker output and create an echo loop
 
-    # The frontend stops sending audio after ~50ms of silence, but Gemini's
-    # automatic VAD needs ~1s of continuous silence to detect end-of-speech.
-    # When real audio stops arriving, we pump synthetic silent PCM frames so
-    # the VAD gets the silence it needs.
-    #
-    # Timing: during SILENCE_PUMP_DELAY, Gemini receives nothing (VAD paused).
-    # The silenceDurationMs counter only starts once silence frames arrive.
-    # Total latency from candidate stopping to VAD fire:
-    #   SILENCE_PUMP_DELAY (500ms) + silenceDurationMs (1000ms) = ~1.5s
-    #
-    # 500ms is above typical intra-sentence pauses (200-400ms) so the pump
-    # won't cycle on natural speech. At 200ms, the pump fires on every pause,
-    # gets cancelled when speech resumes, and Gemini never accumulates enough
-    # continuous silence to trigger turnComplete.
+    # Silence pump: browser stops sending audio during silence, but Gemini's
+    # VAD needs continuous frames to detect end-of-speech. After SILENCE_PUMP_DELAY
+    # of no real audio, we pump synthetic silent PCM frames.
     SILENCE_PUMP_DELAY    = 1 # wait 1s after last real audio before pumping
     SILENCE_PUMP_INTERVAL = 0.03      # ~30ms between frames (matches worklet cadence)
     SILENCE_FRAME_SAMPLES = 640       # 40ms at 16kHz — slightly over-sized so EM timer
     # jitter never creates a perceived gap in silence
     SILENCE_FRAME = ("\x00" * (SILENCE_FRAME_SAMPLES * 2)).freeze # 16-bit PCM zeros
 
-    attr_reader :resumption_token, :connected, :connected_at, :inactivity_close, :resumption_failed
+    attr_reader :resumption_token, :connected, :connected_at, :inactivity_close
 
     def initialize(
       system_prompt:,
@@ -83,11 +72,8 @@ module Gemini
     # If resumption_handle is provided, resumes a previous session.
     # If seed_history is true, setup includes historyConfig so clientContent
     # can be used to seed conversation context (Gemini 3.1 requirement).
-    def connect(resumption_handle: nil, seed_history: false)
-      @awaiting_session_resumption = resumption_handle.present?
-      @seed_history = seed_history
+    def connect(resumption_handle: nil)
       @setup_complete = false
-      @resumption_received = false
 
       url = "#{GEMINI_WS_URL}?key=#{@api_key}"
 
@@ -191,10 +177,13 @@ module Gemini
       @connected && @ws && !@superseded
     end
 
+    def silence_pumping?
+      @silence_pumping
+    end
+
     # Gracefully closes the connection.
     def close
       @inactivity_timer&.cancel
-      @resumption_ready_timer&.cancel
       @gate_timer&.cancel
       stop_silence_pump
       @ws&.close
@@ -207,7 +196,6 @@ module Gemini
     def supersede!
       @superseded = true
       @inactivity_timer&.cancel
-      @resumption_ready_timer&.cancel
       @gate_timer&.cancel
       stop_silence_pump
     end
@@ -381,56 +369,20 @@ module Gemini
           systemInstruction: {
             parts: [{ text: @system_prompt }]
           },
-          # realtimeInputConfig removed (gemini-3.1 experiment).
-          # Gemini 3.1's default VAD should handle silence detection.
-          # If needed, re-enable with:
-          # realtimeInputConfig: {
-          #   automaticActivityDetection: {
-          #     startOfSpeechSensitivity: 'START_SENSITIVITY_LOW',
-          #     endOfSpeechSensitivity: 'END_SENSITIVITY_HIGH',
-          #     silenceDurationMs: 500
-          #   }
-          # },
           inputAudioTranscription: {},
           outputAudioTranscription: {},
           contextWindowCompression: {
             slidingWindow: {}
-          },
-          sessionResumption: resumption_handle ? { handle: resumption_handle } : {}
+          }
         }
       }
 
-      # historyConfig removed — clientContent-based history seeding didn't work
-      # reliably (trigger_opening failed to get a response). Using realtimeInput.text
-      # for everything instead. Tradeoff: AI may re-ask on full reconnect.
+      # Always include sessionResumption — empty {} enables handle generation,
+      # with handle resumes the session. Must be present on initial connection
+      # or Gemini never sends sessionResumptionUpdate handles.
+      setup[:setup][:sessionResumption] = resumption_handle.present? ? { handle: resumption_handle } : {}
 
       @ws.send(setup.to_json)
-    end
-
-    public
-
-    # Seeds conversation history via clientContent (Gemini 3.1).
-    # Only works when setup included historyConfig.initialHistoryInClientContent.
-    # Sends alternating user/model turns, then closes with turnComplete: true.
-    def seed_conversation_history(turns)
-      return unless @connected && @ws && turns.any?
-
-      turns.each do |turn|
-        message = {
-          clientContent: {
-            turns: [{
-              role: turn[:role],
-              parts: [{ text: turn[:text] }]
-            }],
-            turnComplete: false
-          }
-        }
-        @ws.send(message.to_json)
-      end
-
-      # Close the history — signals Gemini to start the realtime conversation
-      @ws.send({ clientContent: { turnComplete: true } }.to_json)
-      Rails.logger.info("[Gemini::LiveClient] Seeded #{turns.size} history turns")
     end
 
     def handle_message(raw_data)
@@ -506,9 +458,9 @@ module Gemini
             end
           end
         else
-          # Empty generation (0 audio) — likely from coverage injection.
-          # No speaker output to drain, so skip the gate delay entirely.
-          Rails.logger.debug('[Gemini::LiveClient] Empty generationComplete (0 audio) — skipping gate delay')
+          # Empty generation (0 audio) — open gate immediately, no echo risk.
+          Rails.logger.debug('[Gemini::LiveClient] Empty generationComplete (0 audio)')
+          @on_model_turn_complete&.call
         end
       end
 
@@ -556,55 +508,25 @@ module Gemini
         end
       end
 
-      # Session resumption token update
+      # Session resumption token update — store the latest handle.
+      # Gemini sends these periodically at server-side checkpoints.
       if (resumption = data['sessionResumption'] || data.dig('sessionResumptionUpdate'))
-        handle = resumption['handle'] || resumption['token'] || resumption['newHandle']
+        Rails.logger.debug("[Gemini::LiveClient] Resumption data: #{resumption.to_json}")
+        handle = resumption['newHandle'] || resumption['handle'] || resumption['token']
         if handle.present?
           @resumption_token = handle
           @on_resumption_token_update&.call(handle)
         end
-
-        # For resumed sessions, the session isn't fully ready until this
-        # handshake completes. Audio sent before this is silently dropped.
-        if @awaiting_session_resumption
-          if @setup_complete && !@connected
-            @awaiting_session_resumption = false
-            @resumption_ready_timer&.cancel
-            activate_connection!
-          else
-            # Token arrived before setupComplete — remember it so setupComplete
-            # can activate immediately instead of waiting 5s for a second token.
-            @resumption_received = true
-          end
-        end
       end
 
-      # Setup complete — Gemini is ready to receive audio
+      # Setup complete — Gemini is ready.
+      # Session resumption is NOT a handshake — there's no confirmation.
+      # If we sent a resumption handle, the session is already resumed on
+      # setupComplete. Just activate and start sending audio.
       if data['setupComplete']
         @setup_complete = true
         @connected_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-
-        if @awaiting_session_resumption
-          if @resumption_received
-            # Token already arrived before setupComplete — activate immediately.
-            @awaiting_session_resumption = false
-            activate_connection!
-          else
-            # Resumed session — wait for sessionResumption before accepting audio.
-            # Safety timeout: if token doesn't arrive in 5s, force a full reconnect.
-            Rails.logger.info('[Gemini::LiveClient] Setup complete — awaiting session resumption handshake')
-            @resumption_ready_timer = EM::Timer.new(5) do
-              next if @connected || @superseded
-
-              Rails.logger.warn('[Gemini::LiveClient] Session resumption timeout — forcing full reconnect')
-              @awaiting_session_resumption = false
-              @resumption_failed = true
-              @ws&.close
-            end
-          end
-        else
-          activate_connection!
-        end
+        activate_connection!
       end
 
       # GoAway signal — need to reconnect

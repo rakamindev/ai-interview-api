@@ -104,14 +104,14 @@ module Assessments
         Bad: "We've discussed a lot about problem solving. Let's move on."
         Good: "The caching approach you described — how does that thinking apply when you're designing a larger system from scratch?"
 
-        7. WRAP UP — CLOSE IMMEDIATELY
-        When all skills are covered OR when you receive a time warning, say goodbye and STOP.
-        Say ONE sentence: thank the candidate and tell them they'll hear back soon. Nothing else.
-        NEVER ask "Do you have any questions?", "Is there anything else?", "Any questions about the role/team?"
-        NEVER invite further conversation. Just close it.
+        7. WRAP UP NATURALLY
+        When all skills are covered OR when you receive a time warning:
+        First, react to the candidate's last answer naturally (brief acknowledgment).
+        Then close with a warm statement. Two sentences max.
+        NEVER ask follow-up questions. NEVER invite further conversation.
         Bad: "Thank you. Do you have any questions about the role or team?"
-        Bad: "Great conversation. Is there anything you'd like to ask?"
-        Good: "That was a great conversation — thank you for your time, you'll hear back from the team soon."
+        Bad: (ignoring the last answer) "Thanks for your time, you'll hear back soon."
+        Good: "That's a really interesting approach — I can see you've thought deeply about it. I think I've covered everything, thank you for your time. You'll hear back from the team soon."
       TEXT
     end
 
