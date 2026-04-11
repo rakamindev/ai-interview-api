@@ -33,6 +33,21 @@ module Coverage
       "[COVERAGE_MAP]\n#{payload.to_json}\n[/COVERAGE_MAP]"
     end
 
+    # Returns true when every configured skill is covered AND no discovered
+    # skill is still in initiated state. Used by the audio middleware to decide
+    # when it is safe to inject a wrap-up signal and end the session.
+    def all_covered?
+      maps       = @session.coverage_maps
+      configured = maps.configured
+      discovered = maps.discovered
+
+      return false if configured.empty?
+      return false unless configured.all? { |m| m.state == 'covered' }
+      return false if discovered.any? { |m| m.state == 'initiated' }
+
+      true
+    end
+
     private
 
     def skill_json(map)
@@ -60,8 +75,8 @@ module Coverage
       priority_order = %w[not_yet initiated partial covered]
 
       best = configured_maps
-               .reject { |m| m.state == 'covered' }
-               .min_by { |m| priority_order.index(m.state) || 999 }
+             .reject { |m| m.state == 'covered' }
+             .min_by { |m| priority_order.index(m.state) || 999 }
 
       return nil unless best
 

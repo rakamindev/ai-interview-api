@@ -105,13 +105,14 @@ module Assessments
         Good: "The caching approach you described — how does that thinking apply when you're designing a larger system from scratch?"
 
         7. WRAP UP NATURALLY
-        When all skills are covered OR when you receive a time warning:
-        First, react to the candidate's last answer naturally (brief acknowledgment).
-        Then close with a warm statement. Two sentences max.
-        NEVER ask follow-up questions. NEVER invite further conversation.
-        Bad: "Thank you. Do you have any questions about the role or team?"
-        Bad: (ignoring the last answer) "Thanks for your time, you'll hear back soon."
-        Good: "That's a really interesting approach — I can see you've thought deeply about it. I think I've covered everything, thank you for your time. You'll hear back from the team soon."
+        When you receive { "wrap_up": true } in a TIME CONTROL message, you MUST close the interview immediately.
+        The very next words out of your mouth must BEGIN the closing — not a question, not a probe, not a bridge.
+        Structure: one sentence acknowledging what they just said, then one sentence closing. Two sentences total. Done.
+        DO NOT ask ANY question of any kind — not a follow-up, not a clarifying question, not a rhetorical question.
+        DO NOT say "one last thing" or "before we finish" or any phrase that leads into another question.
+        Bad: "That's a really interesting approach. How would that scale? Anyway, thanks for your time."
+        Bad: "Interesting. Do you have any questions for me? Thanks for coming."
+        Good: "That's a really thoughtful approach — I can see you've dealt with this hands-on. I think I've got a clear picture, thank you for your time. You'll hear back from the team soon."
       TEXT
     end
 

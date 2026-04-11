@@ -174,6 +174,7 @@ class AudioWebSocketMiddleware
           gemini_ref.inject_context(state.cached_coverage_text)
           state.last_injected_digest = current_digest
           Rails.logger.debug("[AudioWS] Coverage injected (digest=#{current_digest&.slice(0, 8)})")
+
         end
 
         # Push DB writes off the EM thread so we don't stall audio forwarding.
@@ -198,12 +199,20 @@ class AudioWebSocketMiddleware
 
         # Strip coverage/time metadata that leaks into output transcription.
         # Gemini 3.1 echoes realtimeInput.text in various fragmented forms.
-        # One broad regex: strip everything from start up to and including
-        # any JSON containing "skills" + "discovered".
-        # Strip everything from start up to the last } before actual speech.
-        # Covers all variants: with/without time_remaining, with/without priority_next.
-        text = text.sub(/\A\s*\{.*?"discovered"\s*:\s*\[.*?\].*?\}\s*/m, '').strip
+
+        # 1. Strip complete [COVERAGE_MAP]...[/COVERAGE_MAP] blocks including JSON body.
+        #    Previous regex only stripped the tags and left the JSON content behind.
+        text = text.gsub(/\[COVERAGE[_ ]MAP\][\s\S]*?\[\/COVERAGE[_ ]MAP\]/m, '').strip
+        # 2. Strip any orphaned [COVERAGE_MAP] or [/COVERAGE_MAP] tags (split chunks).
         text = text.gsub(/\[COVERAGE[_ ]MAP[^\]]*\]/m, '').strip
+        # 3. Strip full JSON object at the start (complete echo without tags).
+        text = text.sub(/\A\s*\{.*?"discovered"\s*:\s*\[.*?\].*?\}\s*/m, '').strip
+        # 4. Strip any leading JSON fragment that precedes actual speech.
+        #    Covers partial echoes like `"discovered": [], "time_remaining_minutes": 13}] Masuk akal...`
+        #    where the non-greedy "discovered" regex stopped at the first ] inside [].
+        #    Pattern: skip everything up to the last }] (or }) that is immediately followed
+        #    by whitespace + an uppercase letter (start of real speech).
+        text = text.sub(/\A[\s\S]*?[\}\]]+[\s\}\]]*(?=\p{Lu})/m, '').strip
         text = text.gsub(/\[TIME CONTROL[^\]]*\][^\n]*/m, '').strip
         text = text.gsub(/\[Start the interview[^\]]*\]/m, '').strip
         text = text.gsub(/\[SESSION RESUME\][^\n]*/m, '').strip
@@ -221,12 +230,15 @@ class AudioWebSocketMiddleware
         send_json(browser_ws, type: 'transcription', speaker: 'ai',
                               text: text, turn_number: turn_number)
 
+        # Track whether the AI's last turn ended with a question.
+        # Used by handle_coverage_auto_end to decide whether to inject a
+        # wrap-up signal (AI is still probing) or end immediately (AI closed).
+        state.last_ai_turn_ends_with_question = text.rstrip.end_with?('?')
+
         # Check time ceiling after AI turn too — so the session ends even if
         # the candidate stops talking after the AI's closing statement.
         check_time_ceiling(session, state, browser_ws)
 
-        # Auto-end disabled — session ends when candidate clicks "End Interview"
-        # or time ceiling is reached. Coverage-based auto-end is in backlog.
       },
 
       # Fires after the model's turnComplete — all audio frames have been sent,
@@ -245,6 +257,8 @@ class AudioWebSocketMiddleware
         end
 
         send_json(browser_ws, type: 'speaker_changed', speaker: 'candidate')
+
+        handle_coverage_auto_end(browser_ws, state, session)
       },
 
       on_go_away: lambda { |time_left:, resumption_token:|
@@ -495,6 +509,125 @@ class AudioWebSocketMiddleware
     end
   end
 
+  # Sends session_ended to the browser, then closes both connections.
+  # Must be called from inside EM.schedule (runs on the EM thread) OR from a
+  # Thread.new — it uses EM.schedule internally to touch the WebSocket safely.
+  #
+  # The 300ms delay before browser_ws.close is intentional: it gives the
+  # frontend time to receive and process the session_ended JSON message before
+  # the WebSocket close event fires. Without the delay, the browser's onclose
+  # fires first and triggers the reconnection UI instead of the complete screen.
+  def close_session_after_end(browser_ws, state, reason:)
+    EM.schedule do
+      send_json(browser_ws, type: 'session_ended', reason: reason)
+      state.gemini_client&.close
+      EM.add_timer(0.3) do
+        begin
+          browser_ws.close
+        rescue StandardError
+          nil
+        end
+      end
+    end
+  end
+
+  # Called on the EM thread when refresh_coverage_cache detects all_covered.
+  # Only sets the coverage_pending flag — injection is always deferred to
+  # handle_coverage_auto_end (on_model_turn_complete), which fires at a
+  # guaranteed-safe point (after turnComplete, AI truly idle).
+  #
+  # Injecting here caused a race: model_speaking can be false while the AI is
+  # mid-generation (first audio frame hasn't arrived yet), so inject_context
+  # landed mid-turn. Gemini finished the question it was already generating AND
+  # responded to the wrap-up signal — producing the question+closing hybrid.
+  def schedule_coverage_wrap_up(state, session)
+    return if state.coverage_pending || state.ending_scheduled
+
+    state.coverage_pending = true
+    Rails.logger.info("[AudioWS] All skills covered — wrap-up pending next AI turn (session=#{session.id})")
+  end
+
+  # Coverage auto-end logic — called from on_model_turn_complete.
+  #
+  # Two paths depending on the AI's last turn:
+  #
+  #   AI ended with a question ("?"):
+  #     Inject wrap-up signal so the AI delivers a closing before we end.
+  #     Wait for its next on_model_turn_complete (phase 2), then finalize.
+  #     5s fallback in case the AI generates nothing after injection.
+  #
+  #   AI ended with a statement (closing):
+  #     End immediately — no injection. Injecting here caused the AI to
+  #     close twice (once naturally, once responding to the signal).
+  def handle_coverage_auto_end(browser_ws, state, session)
+    return unless state.coverage_pending && !state.ending_scheduled
+
+    if state.wrap_up_injected
+      # Phase 2: AI delivered its closing turn after the wrap-up signal.
+      state.coverage_end_timer&.cancel
+      state.ending_scheduled = true
+      Rails.logger.info("[AudioWS] Wrap-up turn complete — finalizing session #{session.id}")
+      send_json(browser_ws, type: 'preparing_to_end', reason: 'all_covered')
+      poll_for_session_end(browser_ws, state, session, attempts: 0)
+
+    elsif state.last_ai_turn_ends_with_question
+      # Phase 1: AI just asked a question — inject wrap-up so it closes gracefully.
+      wrap_up_signal = '[TIME CONTROL — DO NOT SPEAK THIS] { "wrap_up": true, "all_skills_covered": true }' \
+                       ' — Close the interview NOW. Do NOT ask any more questions.' \
+                       ' Acknowledge their last answer in one sentence, then say goodbye in one sentence.' \
+                       ' Two sentences total, then stop.'
+      delivered = state.gemini_client&.inject_context(wrap_up_signal)
+      if delivered
+        state.wrap_up_injected = true
+        Rails.logger.info("[AudioWS] AI ended with question — wrap-up injected (session=#{session.id})")
+
+        # Fallback: if the AI generates nothing after the injection (e.g., it
+        # already finished speaking), finalize after a short grace period.
+        state.coverage_end_timer&.cancel
+        state.coverage_end_timer = EM::Timer.new(5) do
+          next if state.ending_scheduled
+
+          state.ending_scheduled = true
+          Rails.logger.info("[AudioWS] Wrap-up fallback fired (session=#{session.id})")
+          send_json(browser_ws, type: 'preparing_to_end', reason: 'all_covered')
+          poll_for_session_end(browser_ws, state, session, attempts: 0)
+        end
+      end
+
+    else
+      # AI already delivered a closing statement — finalize immediately.
+      state.coverage_end_timer&.cancel
+      state.ending_scheduled = true
+      Rails.logger.info("[AudioWS] AI closed naturally — finalizing session #{session.id}")
+      send_json(browser_ws, type: 'preparing_to_end', reason: 'all_covered')
+      poll_for_session_end(browser_ws, state, session, attempts: 0)
+    end
+  end
+
+  # Polls once per second until the session is ended (by the audio_complete API call
+  # from the frontend) or until max_attempts is reached, then ends the session directly.
+  # Must be called on the EM thread; schedules itself recursively via EM.schedule.
+  def poll_for_session_end(browser_ws, state, session, attempts:)
+    max_attempts = 30
+
+    EM.add_timer(1) do
+      Thread.new do
+        ActiveRecord::Base.connection_pool.with_connection do
+          if session.reload.ended?
+            Rails.logger.info("[AudioWS] Session #{session.id} ended via audio_complete — closing WebSocket")
+            close_session_after_end(browser_ws, state, reason: 'all_covered')
+          elsif attempts >= max_attempts
+            Rails.logger.warn("[AudioWS] audio_complete poll timed out — ending session #{session.id} directly")
+            Sessions::EndHandler.new(session).call(reason: 'all_covered')
+            close_session_after_end(browser_ws, state, reason: 'all_covered')
+          else
+            EM.schedule { poll_for_session_end(browser_ws, state, session, attempts: attempts + 1) }
+          end
+        end
+      end
+    end
+  end
+
   # Refreshes the cached coverage text for the next turn.
   # Called from a background thread after each candidate turn.
   # The cached text is injected synchronously on the EM thread in
@@ -511,8 +644,9 @@ class AudioWebSocketMiddleware
     end
 
     # Compute the full text while still on the background thread (DB query + serialization).
-    text    = injector.injection_text
-    elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC, :millisecond) - started
+    text        = injector.injection_text
+    all_covered = injector.all_covered?
+    elapsed     = Process.clock_gettime(Process::CLOCK_MONOTONIC, :millisecond) - started
 
     # Assign both values atomically on the EM thread so on_input_transcription
     # never sees a new digest paired with stale text. Without this, a GVL preemption
@@ -521,6 +655,10 @@ class AudioWebSocketMiddleware
     EM.schedule do
       state.last_coverage_digest = fingerprint
       state.cached_coverage_text = text
+
+      # If all skills just became covered, start the wrap-up sequence.
+      # AI idle → inject immediately. AI speaking → on_model_turn_complete retries.
+      schedule_coverage_wrap_up(state, session) if all_covered
     end
 
     Rails.logger.warn("[AudioWS] Coverage cache refresh slow: #{elapsed}ms (session=#{session.id})") if elapsed > 50
@@ -569,15 +707,7 @@ class AudioWebSocketMiddleware
             next if session.reload.ended?
 
             Sessions::EndHandler.new(session).call(reason: 'time_ceiling')
-            EM.schedule do
-              send_json(browser_ws, type: 'session_ended', reason: 'time_ceiling')
-              gemini_client&.close
-              begin
-                browser_ws.close
-              rescue StandardError
-                nil
-              end
-            end
+            close_session_after_end(browser_ws, state, reason: 'time_ceiling')
           end
         end
       end
@@ -647,13 +777,16 @@ class AudioWebSocketMiddleware
                   :cached_coverage_text, :last_injected_digest,
                   :logged_gate_suppressed, :reconnect_after_turn,
                   :graceful_end_timer, :time_ceiling_timer,
-                  :coverage_end_timer, :coverage_pending
+                  :coverage_end_timer, :coverage_pending,
+                  :last_ai_turn_ends_with_question, :wrap_up_injected
 
     def initialize
       @turn_counter = 0
       @reconnect_attempts = 0
       @reconnecting = false
       @model_speaking = false
+      @wrap_up_injected = false
+      @last_ai_turn_ends_with_question = false
       @sent_time_warnings = Set.new
       @audio_buffer = AudioRingBuffer.new(capacity_seconds: AudioWebSocketMiddleware::AUDIO_BUFFER_SECONDS)
     end

@@ -81,16 +81,29 @@ module Api
       end
 
       def vacancy_with_skills_json(vacancy)
+        skills = vacancy.vacancy_skills
+
+        # Preload taxonomy anchors in one query to avoid N+1
+        skill_ids    = skills.filter_map(&:skill_id).uniq
+        taxonomy_map = SkillTaxonomy.where(skill_id: skill_ids).index_by(&:skill_id)
+
         vacancy_json(vacancy).merge(
-          skills: vacancy.vacancy_skills.map do |s|
-            {
-              id:             s.id,
-              skill_id:       s.skill_id,
-              skill_label:    s.skill_label,
-              expected_level: s.expected_level
-            }
-          end
+          skills: skills.map { |s| vacancy_skill_json(s, taxonomy_map[s.skill_id]) }
         )
+      end
+
+      def vacancy_skill_json(skill, taxonomy)
+        {
+          id:             skill.id,
+          skill_id:       skill.skill_id,
+          skill_label:    skill.skill_label,
+          expected_level: skill.expected_level,
+          l1_anchor:      taxonomy&.l1_anchor,
+          l2_anchor:      taxonomy&.l2_anchor,
+          l3_anchor:      taxonomy&.l3_anchor,
+          l4_anchor:      taxonomy&.l4_anchor,
+          l5_anchor:      taxonomy&.l5_anchor
+        }
       end
 
       def pagination_meta(collection)

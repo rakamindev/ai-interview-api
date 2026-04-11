@@ -10,7 +10,7 @@ class Assessment < ApplicationRecord
 
   validates :name, presence: true
   validates :time_limit_min, presence: true,
-                              inclusion: { in: [30, 45, 60, 90] }
+                              inclusion: { in: [10, 30, 45, 60, 90] }
   validates :language, inclusion: { in: SUPPORTED_LANGUAGES.keys }, allow_nil: true
 
   accepts_nested_attributes_for :assessment_skills,

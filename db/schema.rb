@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[7.0].define(version: 2026_03_23_032702) do
+ActiveRecord::Schema[7.0].define(version: 2026_04_11_000000) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pgcrypto"
   enable_extension "plpgsql"
@@ -53,7 +53,7 @@ ActiveRecord::Schema[7.0].define(version: 2026_03_23_032702) do
     t.datetime "updated_at", null: false
     t.string "language", default: "en"
     t.index ["tenant_id"], name: "index_assessments_on_tenant_id"
-    t.check_constraint "time_limit_min = ANY (ARRAY[30, 45, 60, 90])", name: "chk_assessments_time_limit"
+    t.check_constraint "time_limit_min = ANY (ARRAY[10, 30, 45, 60, 90])", name: "chk_assessments_time_limit"
   end
 
   create_table "assessor_overrides", force: :cascade do |t|

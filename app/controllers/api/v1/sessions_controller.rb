@@ -3,8 +3,8 @@
 module Api
   module V1
     class SessionsController < ApiController
-      authorize_auth_token! :assessor, except: %i[candidate_info]
-      skip_before_action :require_tenant!, only: %i[candidate_info]
+      authorize_auth_token! :assessor, except: %i[candidate_info audio_complete]
+      skip_before_action :require_tenant!, only: %i[candidate_info audio_complete]
 
       before_action :set_session, only: %i[show end_session coverage transcript]
 
@@ -109,6 +109,24 @@ module Api
           end,
           total: turns.count
         )
+      end
+
+      # POST /sessions/:token/audio_complete  — no JWT, invite token in URL
+      # Called by the frontend when the audio queue drains after a preparing_to_end signal.
+      # Ends the session if all coverage is complete; idempotent if already ended.
+      def audio_complete
+        session = Session.unscoped.find_by(invite_token: params[:token])
+        return json_error("Invalid or expired invite token", :not_found) unless session
+
+        return json_response(ended: true, message: "Session already ended") if session.ended?
+
+        injector = Coverage::MapInjector.new(session)
+        unless injector.all_covered?
+          return json_response(ended: false, message: "Coverage not yet complete")
+        end
+
+        Sessions::EndHandler.new(session).call(reason: 'all_covered')
+        json_response(ended: true, message: "Session ended")
       end
 
       # GET /sessions/:token/candidate  — no JWT, invite token in URL
