@@ -175,6 +175,21 @@ class AudioWebSocketMiddleware
           state.last_injected_digest = current_digest
           Rails.logger.debug("[AudioWS] Coverage injected (digest=#{current_digest&.slice(0, 8)})")
 
+          # If we're waiting for the candidate to respond before injecting wrap-up
+          # (AI ended its last turn with a question), do it now alongside the
+          # coverage injection so the AI's response to the candidate's answer is
+          # the closing, not another question.
+          if state.waiting_for_candidate_response && !state.wrap_up_injected
+            wrap_up_signal = '[TIME CONTROL — DO NOT SPEAK THIS] { "wrap_up": true, "all_skills_covered": true }' \
+                             ' — Close the interview NOW. Do NOT ask any more questions.' \
+                             ' Acknowledge their last answer in one sentence, then say goodbye in one sentence.' \
+                             ' Two sentences total, then stop.'
+            gemini_ref.inject_context(wrap_up_signal)
+            state.wrap_up_injected = true
+            state.waiting_for_candidate_response = false
+            state.coverage_end_timer&.cancel
+            Rails.logger.info("[AudioWS] Candidate responded — wrap-up piggybacked on coverage injection (session=#{session.id})")
+          end
         end
 
         # Push DB writes off the EM thread so we don't stall audio forwarding.
@@ -571,26 +586,28 @@ class AudioWebSocketMiddleware
       poll_for_session_end(browser_ws, state, session, attempts: 0)
 
     elsif state.last_ai_turn_ends_with_question
-      # Phase 1: AI just asked a question — inject wrap-up so it closes gracefully.
-      wrap_up_signal = '[TIME CONTROL — DO NOT SPEAK THIS] { "wrap_up": true, "all_skills_covered": true }' \
-                       ' — Close the interview NOW. Do NOT ask any more questions.' \
-                       ' Acknowledge their last answer in one sentence, then say goodbye in one sentence.' \
-                       ' Two sentences total, then stop.'
-      delivered = state.gemini_client&.inject_context(wrap_up_signal)
-      if delivered
-        state.wrap_up_injected = true
-        Rails.logger.info("[AudioWS] AI ended with question — wrap-up injected (session=#{session.id})")
+      # Phase 1: AI just asked a question — wait for the candidate to answer it
+      # before injecting wrap-up. This avoids the AI closing immediately via
+      # the silence pump without giving the candidate a chance to respond.
+      # on_input_transcription will piggyback the wrap-up on the candidate's
+      # next turn so the AI's response to their answer is the closing.
+      state.waiting_for_candidate_response = true
+      Rails.logger.info("[AudioWS] AI ended with question — waiting for candidate response before wrap-up (session=#{session.id})")
 
-        # Fallback: if the AI generates nothing after the injection (e.g., it
-        # already finished speaking), finalize after a short grace period.
-        state.coverage_end_timer&.cancel
-        state.coverage_end_timer = EM::Timer.new(5) do
-          next if state.ending_scheduled
+      # Fallback: if the candidate never responds, inject wrap-up directly.
+      state.coverage_end_timer&.cancel
+      state.coverage_end_timer = EM::Timer.new(20) do
+        next if state.ending_scheduled || state.wrap_up_injected
 
-          state.ending_scheduled = true
-          Rails.logger.info("[AudioWS] Wrap-up fallback fired (session=#{session.id})")
-          send_json(browser_ws, type: 'preparing_to_end', reason: 'all_covered')
-          poll_for_session_end(browser_ws, state, session, attempts: 0)
+        wrap_up_signal = '[TIME CONTROL — DO NOT SPEAK THIS] { "wrap_up": true, "all_skills_covered": true }' \
+                         ' — Close the interview NOW. Do NOT ask any more questions.' \
+                         ' Acknowledge their last answer in one sentence, then say goodbye in one sentence.' \
+                         ' Two sentences total, then stop.'
+        delivered = state.gemini_client&.inject_context(wrap_up_signal)
+        if delivered
+          state.wrap_up_injected = true
+          state.waiting_for_candidate_response = false
+          Rails.logger.info("[AudioWS] Candidate silent — wrap-up injected via fallback (session=#{session.id})")
         end
       end
 
@@ -778,7 +795,8 @@ class AudioWebSocketMiddleware
                   :logged_gate_suppressed, :reconnect_after_turn,
                   :graceful_end_timer, :time_ceiling_timer,
                   :coverage_end_timer, :coverage_pending,
-                  :last_ai_turn_ends_with_question, :wrap_up_injected
+                  :last_ai_turn_ends_with_question, :wrap_up_injected,
+                  :waiting_for_candidate_response
 
     def initialize
       @turn_counter = 0
@@ -787,6 +805,7 @@ class AudioWebSocketMiddleware
       @model_speaking = false
       @wrap_up_injected = false
       @last_ai_turn_ends_with_question = false
+      @waiting_for_candidate_response = false
       @sent_time_warnings = Set.new
       @audio_buffer = AudioRingBuffer.new(capacity_seconds: AudioWebSocketMiddleware::AUDIO_BUFFER_SECONDS)
     end

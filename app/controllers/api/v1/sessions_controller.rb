@@ -120,11 +120,9 @@ module Api
 
         return json_response(ended: true, message: "Session already ended") if session.ended?
 
-        injector = Coverage::MapInjector.new(session)
-        unless injector.all_covered?
-          return json_response(ended: false, message: "Coverage not yet complete")
-        end
-
+        # No coverage re-check here. The backend WS already verified all_covered
+        # before sending preparing_to_end. Re-checking here caused false negatives
+        # (timing gap between WS detection and HTTP call) that stalled auto-end.
         Sessions::EndHandler.new(session).call(reason: 'all_covered')
         json_response(ended: true, message: "Session ended")
       end

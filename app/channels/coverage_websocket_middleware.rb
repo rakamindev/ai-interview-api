@@ -29,7 +29,28 @@ class CoverageWebSocketMiddleware
     redis_sub = nil  # track subscription Redis instance for cleanup
 
     ws.on :open do |_event|
+      # Try header-based auth first (assessor dashboard with JWT in header).
+      # If no Authorization header is present, wait for a { type: "auth", token }
+      # message — this matches the pattern used by the audio WS for browser clients
+      # that can't set WebSocket headers.
       session, error = authenticate_assessor(env, session_id)
+      next if error  # wait for auth message
+
+      send_current_state(ws, session)
+      redis_sub = subscribe_to_coverage_updates(ws, session_id)
+    end
+
+    ws.on :message do |event|
+      next unless event.data.is_a?(String)
+
+      message = JSON.parse(event.data) rescue next
+      next unless message['type'] == 'auth'
+
+      # Already authenticated via header — ignore
+      next if redis_sub
+
+      token   = message['token'].to_s
+      session, error = authenticate_assessor_by_token(token, session_id)
 
       if error
         ws.send({ type: 'error', code: 'auth_failed', message: error }.to_json)
@@ -37,10 +58,7 @@ class CoverageWebSocketMiddleware
         next
       end
 
-      # Send current state immediately on connect
       send_current_state(ws, session)
-
-      # Subscribe to Redis pub/sub for live updates
       redis_sub = subscribe_to_coverage_updates(ws, session_id)
     end
 
@@ -99,7 +117,10 @@ class CoverageWebSocketMiddleware
     auth_header = env['HTTP_AUTHORIZATION']
     return [nil, 'Missing authorization'] unless auth_header.present?
 
-    token   = auth_header.split(' ').last
+    authenticate_assessor_by_token(auth_header.split(' ').last, session_id)
+  end
+
+  def authenticate_assessor_by_token(token, session_id)
     payload = JsonWebToken.decode(token)
 
     org = Organization.find_by(scheme: payload[:scheme])
