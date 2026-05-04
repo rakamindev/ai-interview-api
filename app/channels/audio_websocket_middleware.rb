@@ -242,6 +242,13 @@ class AudioWebSocketMiddleware
       # Track whether the AI's last turn ended with a question — drives wrap-up branching.
       state.last_ai_turn_ends_with_question = text.rstrip.end_with?('?')
 
+      # Safety net: if AI said closing words without a system wrap_up signal, log loudly and
+      # treat it as a natural close so the session doesn't hang open forever.
+      if !state.ending_scheduled && !state.coverage_pending && ai_closing_detected?(text)
+        Rails.logger.warn("[AudioWS] AI closed without system signal — forcing coverage_pending (session=#{session.id})")
+        state.coverage_pending = true
+      end
+
       check_time_ceiling(session, state, browser_ws)
     }
   end
@@ -526,6 +533,9 @@ class AudioWebSocketMiddleware
   # Coverage auto-end logic — called from on_model_turn_complete. Branches on whether AI closed naturally,
   # ended with a question (need wrap-up signal), or already delivered the post-signal closing.
   def handle_coverage_auto_end(browser_ws, state, session)
+    # Safety net: if we injected wrap_up but coverage_pending somehow wasn't set, recover.
+    state.coverage_pending = true if state.wrap_up_injected && !state.coverage_pending
+
     return unless state.coverage_pending && !state.ending_scheduled
 
     if state.wrap_up_injected
@@ -678,6 +688,24 @@ class AudioWebSocketMiddleware
     return unless state.gemini_client.inject_context(signal)
 
     state.sent_time_warnings.add(key)
+  end
+
+  CLOSING_PHRASES = [
+    'you\'ll hear back from the team',
+    'you\'ll hear from the team',
+    'kamu akan mendengar kabar dari tim',
+    'terima kasih banyak atas waktumu',
+    'thank you for your time',
+    'that concludes our interview',
+    'that\'s all for today',
+    'good luck',
+    'semoga sukses',
+    'sampai jumpa'
+  ].freeze
+
+  def ai_closing_detected?(text)
+    downcased = text.downcase
+    CLOSING_PHRASES.any? { |phrase| downcased.include?(phrase) }
   end
 
   def authenticate_and_load(env, session_id)

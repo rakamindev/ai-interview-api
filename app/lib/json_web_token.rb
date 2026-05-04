@@ -3,7 +3,6 @@
 # Identical to rakamin-api's JsonWebToken.
 # Uses the same SECRET_KEY_BASE so tokens issued by rakamin are accepted here.
 class JsonWebToken
-  HMAC_SECRET = ENV['SECRET_KEY_BASE']
   TOKEN_EXPIRATION_TIME = ENV['TOKEN_EXPIRATION_TIME'].presence
 
   def self.encode(payload, expire_time = nil)
@@ -12,11 +11,11 @@ class JsonWebToken
       payload[:exp] = Time.zone.now.to_i + expire_time.to_i
     end
 
-    JWT.encode(payload, HMAC_SECRET)
+    JWT.encode(payload, hmac_secret, 'HS256')
   end
 
   def self.decode(token, options = {})
-    body = JWT.decode(token, HMAC_SECRET, true, options)[0]
+    body = JWT.decode(token, hmac_secret, true, options.merge(algorithms: ['HS256']))[0]
     HashWithIndifferentAccess.new(body)
   rescue JWT::DecodeError => e
     raise ExceptionHandler::InvalidToken, e.message
@@ -28,4 +27,9 @@ class JsonWebToken
   rescue JWT::DecodeError => e
     raise ExceptionHandler::InvalidToken, e.message
   end
+
+  def self.hmac_secret
+    ENV.fetch('SECRET_KEY_BASE')
+  end
+  private_class_method :hmac_secret
 end

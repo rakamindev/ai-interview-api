@@ -51,6 +51,7 @@ class CoverageAnalyzerWorker
   def create_discovered_skills(session, discovered_skills)
     discovered_skills.each do |discovered|
       next if session.coverage_maps.exists?(skill_label: discovered[:label])
+      next if session.coverage_maps.discovered.count >= 10
 
       session.coverage_maps.create!(
         skill_id:      nil,
