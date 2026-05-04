@@ -1,0 +1,271 @@
+name: Build & Deploy
+
+# Branch → environment mapping:
+#   deployment/* or [deploy] in commit → development (conditional on push)
+#   staging  → staging     (auto on push)
+#   main     → production  (auto on push)
+
+on:
+  push:
+    branches: [main, staging, 'deployment/**', '**']
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        required: true
+        default: development
+        type: choice
+        options: [development, staging, production]
+
+jobs:
+  determine-environment:
+    name: Determine Environment
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.set-env.outputs.environment }}
+      should-deploy: ${{ steps.set-env.outputs.should-deploy }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Resolve environment and deploy gate
+        id: set-env
+        env:
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "environment=${{ inputs.environment }}" >> "$GITHUB_OUTPUT"
+            echo "should-deploy=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          BRANCH="${GITHUB_REF#refs/heads/}"
+          SHOULD_DEPLOY="true"
+
+          if [ "$BRANCH" = "main" ]; then
+            ENV="production"
+            echo "✅ Production deployment"
+          elif [ "$BRANCH" = "staging" ]; then
+            ENV="staging"
+            echo "✅ Staging deployment"
+          else
+            ENV="development"
+            if [[ ! "$BRANCH" =~ ^deployment/ ]]; then
+              if [[ ! "$COMMIT_MESSAGE" =~ \[deploy\] ]]; then
+                SHOULD_DEPLOY="false"
+                echo "⏸️  Skipped — not a deployment/* branch and commit has no [deploy] tag"
+              else
+                echo "✅ Development deployment triggered by [deploy] tag"
+              fi
+            else
+              echo "✅ Development deployment triggered by deployment/* branch"
+            fi
+          fi
+
+          echo "environment=$ENV" >> "$GITHUB_OUTPUT"
+          echo "should-deploy=$SHOULD_DEPLOY" >> "$GITHUB_OUTPUT"
+
+  build-and-deploy:
+    name: Deploy to ${{ needs.determine-environment.outputs.environment }}
+    runs-on: ubuntu-latest
+    needs: determine-environment
+    if: needs.determine-environment.outputs.should-deploy == 'true'
+    environment: ${{ needs.determine-environment.outputs.environment }}
+    permissions:
+      id-token: write
+      contents: read
+
+    env:
+      ENVIRONMENT: ${{ needs.determine-environment.outputs.environment }}
+
+    steps:
+      - name: Start timer
+        id: timer
+        run: echo "start_time=$(date +%s)" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set image tag
+        id: image-tag
+        run: |
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          IMAGE_TAG="$ENVIRONMENT-$SHORT_SHA"
+          echo "tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+          echo "Image tag: $IMAGE_TAG"
+
+      - name: Set GCP project ID
+        id: gcp-project
+        env:
+          GCP_PROJECT_ID_PRODUCTION: ${{ secrets.GCP_PROJECT_ID_PRODUCTION }}
+          GCP_PROJECT_ID_STAGING: ${{ secrets.GCP_PROJECT_ID_STAGING }}
+        run: |
+          if [ "$ENVIRONMENT" = "production" ]; then
+            echo "project_id=$GCP_PROJECT_ID_PRODUCTION" >> "$GITHUB_OUTPUT"
+          else
+            echo "project_id=$GCP_PROJECT_ID_STAGING" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ env.ENVIRONMENT == 'production' && secrets.GCP_CREDENTIALS_PROD || secrets.GCP_SA_KEY }}
+          token_format: access_token
+
+      - name: Check for gcloud
+        id: check-gcloud
+        run: |
+          if command -v gcloud &> /dev/null; then
+            echo "installed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "installed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ steps.gcp-project.outputs.project_id }}
+          skip_install: ${{ steps.check-gcloud.outputs.installed == 'true' }}
+
+      - name: Login to Google Artifact Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.GCR_REGISTRY }}
+          username: oauth2accesstoken
+          password: ${{ steps.auth.outputs.access_token }}
+
+      - name: Set full image path
+        id: image
+        env:
+          GCR_REGISTRY: ${{ secrets.GCR_REGISTRY }}
+          GCR_REPOSITORY: ${{ secrets.GCR_REPOSITORY }}
+          IMAGE_NAME: ${{ secrets.IMAGE_NAME }}
+        run: |
+          PROJECT_ID="${{ steps.gcp-project.outputs.project_id }}"
+          FULL_PATH="$GCR_REGISTRY/$PROJECT_ID/$GCR_REPOSITORY/$IMAGE_NAME"
+          echo "path=$FULL_PATH" >> "$GITHUB_OUTPUT"
+          echo "Using image: $FULL_PATH"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver: docker
+
+      - name: Build and load Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          load: true
+          tags: ${{ steps.image.outputs.path }}:${{ steps.image-tag.outputs.tag }}
+          cache-from: type=registry,ref=${{ secrets.GCR_REGISTRY }}/${{ steps.gcp-project.outputs.project_id }}/${{ secrets.GCR_REPOSITORY }}/buildcache:${{ env.ENVIRONMENT }}
+          cache-to: type=registry,ref=${{ secrets.GCR_REGISTRY }}/${{ steps.gcp-project.outputs.project_id }}/${{ secrets.GCR_REPOSITORY }}/buildcache:${{ env.ENVIRONMENT }},mode=max
+
+      - name: Push Docker image
+        run: docker push ${{ steps.image.outputs.path }}:${{ steps.image-tag.outputs.tag }}
+
+      - name: Install GKE Auth Plugin
+        run: |
+          if command -v gke-gcloud-auth-plugin &> /dev/null; then
+            echo "✅ gke-gcloud-auth-plugin already installed"
+          else
+            gcloud components install gke-gcloud-auth-plugin --quiet
+          fi
+
+      - name: Configure kubectl for GKE
+        env:
+          GCP_REGION: ${{ secrets.GCP_REGION }}
+          GKE_CLUSTER_NAME_PRODUCTION: ${{ secrets.GKE_CLUSTER_NAME_PRODUCTION }}
+          GKE_CLUSTER_NAME_STAGING: ${{ secrets.GKE_CLUSTER_NAME_STAGING }}
+        run: |
+          if ! command -v kubectl &> /dev/null; then
+            gcloud components install kubectl --quiet
+          fi
+
+          PROJECT_ID="${{ steps.gcp-project.outputs.project_id }}"
+          if [ "$ENVIRONMENT" = "production" ]; then
+            CLUSTER_NAME="$GKE_CLUSTER_NAME_PRODUCTION"
+          else
+            CLUSTER_NAME="$GKE_CLUSTER_NAME_STAGING"
+          fi
+
+          gcloud container clusters get-credentials "$CLUSTER_NAME" \
+            --region "$GCP_REGION" \
+            --project "$PROJECT_ID"
+
+          kubectl config set-context --current --namespace=default
+
+      - name: Set deployment name
+        id: deploy-names
+        run: |
+          if [ "$ENVIRONMENT" = "development" ]; then
+            echo "app=ai-interview-app-dev" >> "$GITHUB_OUTPUT"
+          else
+            echo "app=ai-interview-app" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run database migrations
+        env:
+          IMAGE_PATH: ${{ steps.image.outputs.path }}
+          IMAGE_TAG: ${{ steps.image-tag.outputs.tag }}
+          APP_DEPLOY: ${{ steps.deploy-names.outputs.app }}
+        run: |
+          # Pull DB connection details from the cluster ConfigMap + Secret
+          DB_HOST=$(kubectl get cm "${{ steps.deploy-names.outputs.app == 'ai-interview-app-dev' && 'ai-interview-config-dev' || 'ai-interview-config' }}" -o jsonpath='{.data.DB_HOST}')
+          DB_NAME=$(kubectl get cm "${{ steps.deploy-names.outputs.app == 'ai-interview-app-dev' && 'ai-interview-config-dev' || 'ai-interview-config' }}" -o jsonpath='{.data.DB_NAME}')
+          DB_PORT=$(kubectl get cm "${{ steps.deploy-names.outputs.app == 'ai-interview-app-dev' && 'ai-interview-config-dev' || 'ai-interview-config' }}" -o jsonpath='{.data.DB_PORT}')
+          DB_USER=$(kubectl get secret "${{ steps.deploy-names.outputs.app == 'ai-interview-app-dev' && 'ai-interview-secret-dev' || 'ai-interview-secret' }}" -o jsonpath='{.data.DB_USER}' | base64 -d)
+          DB_PASSWORD=$(kubectl get secret "${{ steps.deploy-names.outputs.app == 'ai-interview-app-dev' && 'ai-interview-secret-dev' || 'ai-interview-secret' }}" -o jsonpath='{.data.DB_PASSWORD}' | base64 -d)
+
+          CONTAINER_ID=$(docker create \
+            -e RAILS_ENV="$ENVIRONMENT" \
+            -e DB_HOST="$DB_HOST" \
+            -e DB_PORT="$DB_PORT" \
+            -e DB_NAME="$DB_NAME" \
+            -e DB_USER="$DB_USER" \
+            -e DB_PASSWORD="$DB_PASSWORD" \
+            "$IMAGE_PATH:$IMAGE_TAG" \
+            bundle exec rails db:migrate)
+
+          docker start -a "$CONTAINER_ID"
+          docker rm "$CONTAINER_ID"
+          echo "✅ Database migration completed"
+
+      - name: Update deployment image
+        env:
+          IMAGE_PATH: ${{ steps.image.outputs.path }}
+          IMAGE_TAG: ${{ steps.image-tag.outputs.tag }}
+          APP_DEPLOY: ${{ steps.deploy-names.outputs.app }}
+        run: |
+          kubectl set image deploy/"$APP_DEPLOY" ai-interview-app="$IMAGE_PATH:$IMAGE_TAG"
+
+      - name: Annotate deployment
+        env:
+          IMAGE_TAG: ${{ steps.image-tag.outputs.tag }}
+          APP_DEPLOY: ${{ steps.deploy-names.outputs.app }}
+        run: |
+          kubectl annotate deploy/"$APP_DEPLOY" kubernetes.io/change-cause="${{ github.ref_name }}:${{ github.sha }}:$IMAGE_TAG"
+
+      - name: Calculate deployment duration
+        id: duration
+        if: always()
+        run: |
+          END_TIME=$(date +%s)
+          DURATION=$(printf "%02d:%02d" \
+            $(( (END_TIME - ${{ steps.timer.outputs.start_time }}) / 60 )) \
+            $(( (END_TIME - ${{ steps.timer.outputs.start_time }}) % 60 )))
+          echo "duration=$DURATION" >> "$GITHUB_OUTPUT"
+
+      - name: Notify Mattermost on success
+        if: success() && secrets.MM_WEBHOOK != ''
+        run: |
+          curl -fsSL -X POST "${{ secrets.MM_WEBHOOK }}" \
+            -H 'Content-Type: application/json' \
+            -d "{\"text\": \"**AI Interview API deployed** :rocket:\n\n**Environment:** $ENVIRONMENT\n**Branch:** ${{ github.ref_name }}\n**Duration:** ${{ steps.duration.outputs.duration }}\"}"
+
+      - name: Notify Mattermost on failure
+        if: failure() && secrets.MM_WEBHOOK != ''
+        run: |
+          curl -fsSL -X POST "${{ secrets.MM_WEBHOOK }}" \
+            -H 'Content-Type: application/json' \
+            -d "{\"text\": \"**Deploy failed** @channel :fire:\nBranch \`${{ github.ref_name }}\` → \`$ENVIRONMENT\` failed for ai-interview-api\"}"

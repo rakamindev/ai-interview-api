@@ -11,7 +11,7 @@ module Coverage
       @session = session
       @gemini_client = gemini_client || Gemini::HttpClient.new(
         model:   ENV.fetch('GEMINI_FLASH_MODEL', 'gemini-2.0-flash-001'),
-        timeout: 15
+        timeout: 45
       )
     end
 
