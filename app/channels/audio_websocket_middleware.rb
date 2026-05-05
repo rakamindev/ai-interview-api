@@ -248,11 +248,23 @@ class AudioWebSocketMiddleware
       # Track whether the AI's last turn ended with a question — drives wrap-up branching.
       state.last_ai_turn_ends_with_question = text.rstrip.end_with?('?')
 
-      # Safety net: if AI said closing words without a system wrap_up signal, log loudly and
-      # treat it as a natural close so the session doesn't hang open forever.
-      if !state.ending_scheduled && !state.coverage_pending && ai_closing_detected?(text)
-        Rails.logger.warn("[AudioWS] AI closed without system signal — forcing coverage_pending (session=#{session.id})")
-        state.coverage_pending = true
+      # Safety net: if AI said closing words, set coverage_pending and schedule a 15s fallback
+      # finalizer in case on_model_turn_complete never fires (Gemini sometimes skips turnComplete).
+      if !state.ending_scheduled && ai_closing_detected?(text)
+        unless state.coverage_pending
+          Rails.logger.warn("[AudioWS] AI closed without system signal — forcing coverage_pending (session=#{session.id})")
+          state.coverage_pending = true
+        end
+
+        unless state.ending_scheduled
+          EM.add_timer(15) do
+            next if state.ending_scheduled
+            Rails.logger.warn("[AudioWS] on_model_turn_complete delayed — finalizing via closing-phrase fallback (session=#{session.id})")
+            state.ending_scheduled = true
+            send_json(browser_ws, type: 'preparing_to_end', reason: 'all_covered')
+            poll_for_session_end(browser_ws, state, session, attempts: 0)
+          end
+        end
       end
 
       check_time_ceiling(session, state, browser_ws)
@@ -706,16 +718,23 @@ class AudioWebSocketMiddleware
   end
 
   CLOSING_PHRASES = [
+    # English
     'you\'ll hear back from the team',
     'you\'ll hear from the team',
-    'kamu akan mendengar kabar dari tim',
-    'terima kasih banyak atas waktumu',
     'thank you for your time',
+    'thanks for your time',
     'that concludes our interview',
     'that\'s all for today',
     'good luck',
+    # Indonesian — formal (Anda) and informal (kamu), partial matches cover variations
+    'akan mendengar kabar',           # covers "Anda/kamu akan mendengar kabar dari tim / selanjutnya"
+    'terima kasih atas waktu',        # covers "waktumu", "waktunya", "waktu Anda"
+    'terima kasih banyak atas waktu',
     'semoga sukses',
-    'sampai jumpa'
+    'sampai jumpa',
+    'sampai bertemu lagi',
+    'sesi wawancara ini telah selesai',
+    'wawancara kita sudah selesai'
   ].freeze
 
   def ai_closing_detected?(text)
