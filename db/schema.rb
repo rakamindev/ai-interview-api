@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[7.0].define(version: 2026_04_11_000000) do
+ActiveRecord::Schema[7.0].define(version: 2026_05_05_000000) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pgcrypto"
   enable_extension "plpgsql"
@@ -103,6 +103,8 @@ ActiveRecord::Schema[7.0].define(version: 2026_04_11_000000) do
     t.jsonb "config", default: {}, null: false
     t.timestamptz "created_at", default: -> { "now()" }, null: false
     t.timestamptz "updated_at", default: -> { "now()" }, null: false
+    t.index ["host"], name: "index_organizations_on_host"
+    t.index ["scheme"], name: "index_organizations_on_scheme", unique: true
   end
 
   create_table "portfolio_skills", force: :cascade do |t|

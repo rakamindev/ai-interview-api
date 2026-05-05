@@ -27,15 +27,7 @@ module Gemini
     # Generates content using Gemini REST API.
     # Returns parsed JSON response body.
     def generate_content(prompt, temperature: 0.2)
-      body = {
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: {
-          temperature: temperature
-        }
-      }
-
-      response = @connection.post(generate_url, body.to_json, 'Content-Type' => 'application/json')
-
+      response = @connection.post(generate_url, request_body(prompt, temperature), request_headers)
       parse_response(response)
     rescue Faraday::TimeoutError => e
       raise TimeoutError.new("Gemini API timeout after #{@timeout}s: #{e.message}")
@@ -46,7 +38,18 @@ module Gemini
     private
 
     def generate_url
-      "#{BASE_URL}/models/#{@model}:generateContent?key=#{@api_key}"
+      "#{BASE_URL}/models/#{@model}:generateContent"
+    end
+
+    def request_headers
+      { 'Content-Type' => 'application/json', 'x-goog-api-key' => @api_key }
+    end
+
+    def request_body(prompt, temperature)
+      {
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: { temperature: temperature }
+      }.to_json
     end
 
     def build_connection

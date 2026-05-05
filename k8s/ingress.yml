@@ -1,0 +1,32 @@
+# DO NOT kubectl apply this file directly.
+# Add the rule below to the existing shared ingress: ingress-haproxy
+# Run: kubectl edit ingress ingress-haproxy
+# Then merge the annotations and rules from this file into it.
+#
+# Or apply with: kubectl patch ingress ingress-haproxy --patch-file k8s/ingress-patch.yml
+# (see k8s/ingress-patch.yml for the patch format)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ingress-haproxy   # same name as existing ingress
+  annotations:
+    # Sticky sessions — cookie-based affinity so WebSocket reconnects hit the same pod
+    haproxy-ingress.github.io/affinity: "cookie"
+    haproxy-ingress.github.io/session-cookie-name: "AI_INTERVIEW_ROUTE"
+    haproxy-ingress.github.io/session-cookie-strategy: "insert"
+    haproxy-ingress.github.io/session-cookie-dynamic: "true"
+    # WebSocket timeout — interviews run up to 90 min; default HAProxy timeout is 50s
+    haproxy-ingress.github.io/timeout-tunnel: "5400s"
+spec:
+  ingressClassName: haproxy
+  rules:
+    - host: ai-interview-api.rakamin.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: ai-interview-app
+                port:
+                  number: 3001

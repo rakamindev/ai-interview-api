@@ -14,7 +14,9 @@ class AudioWebSocketMiddleware
   PROACTIVE_RECONNECT_JITTER = 30  # randomise to avoid thundering herd
   AUDIO_BUFFER_SECONDS = 60        # ring buffer capacity per session
 
-  WRAP_UP_SIGNAL = '[TIME CONTROL — DO NOT SPEAK THIS] { "wrap_up": true, "all_skills_covered": true }' \
+  SYSTEM_SIGNAL_TOKEN = 'SYS-TC-7x9k'
+
+  WRAP_UP_SIGNAL = "[TIME CONTROL:#{SYSTEM_SIGNAL_TOKEN}] { \"wrap_up\": true, \"all_skills_covered\": true }" \
                    ' — Close the interview NOW. Do NOT ask any more questions.' \
                    ' Acknowledge their last answer in one sentence, then say goodbye in one sentence.' \
                    ' Two sentences total, then stop.'
@@ -188,6 +190,8 @@ class AudioWebSocketMiddleware
           CoverageAnalyzerWorker.perform_async(session.id, turn_number)
           refresh_coverage_cache(session, state)
         end
+      rescue StandardError => e
+        Rails.logger.error("[AudioWS] Thread crashed (input transcription): #{e.class}: #{e.message}")
       end
 
       send_json(browser_ws, type: 'transcription', speaker: 'candidate',
@@ -234,6 +238,8 @@ class AudioWebSocketMiddleware
         ActiveRecord::Base.connection_pool.with_connection do
           save_transcript_turn(session, turn_number, 'ai', text)
         end
+      rescue StandardError => e
+        Rails.logger.error("[AudioWS] Thread crashed (output transcription): #{e.class}: #{e.message}")
       end
 
       send_json(browser_ws, type: 'transcription', speaker: 'ai',
@@ -299,6 +305,8 @@ class AudioWebSocketMiddleware
         ActiveRecord::Base.connection_pool.with_connection do
           session.update_column(:gemini_resumption_token, token)
         end
+      rescue StandardError => e
+        Rails.logger.error("[AudioWS] Thread crashed (resumption token): #{e.class}: #{e.message}")
       end
     }
   end
@@ -501,6 +509,8 @@ class AudioWebSocketMiddleware
           Sessions::EndHandler.new(state.session).call(reason: 'error')
           EM.schedule { state.gemini_client&.close }
         end
+      rescue StandardError => e
+        Rails.logger.error("[AudioWS] Thread crashed (graceful end): #{e.class}: #{e.message}")
       end
     end
   end
@@ -600,6 +610,8 @@ class AudioWebSocketMiddleware
             EM.schedule { poll_for_session_end(browser_ws, state, session, attempts: attempts + 1) }
           end
         end
+      rescue StandardError => e
+        Rails.logger.error("[AudioWS] Thread crashed (poll session end): #{e.class}: #{e.message}")
       end
     end
   end
@@ -657,17 +669,17 @@ class AudioWebSocketMiddleware
       enforce_time_ceiling(session, state, browser_ws)
     elsif remaining <= 60 && !state.sent_time_warnings.include?(:warn_60)
       mark_warning_if_delivered(state, :warn_60,
-        '[TIME CONTROL — DO NOT SPEAK THIS] { "wrap_up": true }')
+        "[TIME CONTROL:#{SYSTEM_SIGNAL_TOKEN}] { \"wrap_up\": true }")
     elsif remaining <= 120 && !state.sent_time_warnings.include?(:warn_120)
       mark_warning_if_delivered(state, :warn_120,
-        '[TIME CONTROL — DO NOT SPEAK THIS] { "time_warning": true }')
+        "[TIME CONTROL:#{SYSTEM_SIGNAL_TOKEN}] { \"time_warning\": true }")
     end
   end
 
   def enforce_time_ceiling(session, state, browser_ws)
     # Mark :ceiling sent only if inject_context actually delivered — silence pump can return false (C2 fix).
     mark_warning_if_delivered(state, :ceiling,
-      '[TIME CONTROL — DO NOT SPEAK THIS] { "time_warning": true, "wrap_up": true }')
+      "[TIME CONTROL:#{SYSTEM_SIGNAL_TOKEN}] { \"time_warning\": true, \"wrap_up\": true }")
 
     state.ending_scheduled = true
 
@@ -679,6 +691,8 @@ class AudioWebSocketMiddleware
           Sessions::EndHandler.new(session).call(reason: 'time_ceiling')
           close_session_after_end(browser_ws, state, reason: 'time_ceiling')
         end
+      rescue StandardError => e
+        Rails.logger.error("[AudioWS] Thread crashed (time ceiling): #{e.class}: #{e.message}")
       end
     end
   end

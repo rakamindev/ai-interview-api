@@ -63,8 +63,11 @@ module Gemini
     # Opens the WebSocket and sends setup; resumes a prior session if a handle is provided.
     def connect(resumption_handle: nil)
       @setup_complete = false
-      url = "#{GEMINI_WS_URL}?key=#{@api_key}"
-      @ws = Faye::WebSocket::Client.new(url)
+      @ws = Faye::WebSocket::Client.new(
+        GEMINI_WS_URL,
+        nil,
+        headers: { 'x-goog-api-key' => @api_key }
+      )
 
       @ws.on(:open)    { |_event| handle_ws_open(resumption_handle) }
       @ws.on(:message) { |event|  handle_message(event.data) }
