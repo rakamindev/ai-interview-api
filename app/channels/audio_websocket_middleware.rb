@@ -266,7 +266,8 @@ class AudioWebSocketMiddleware
     text = text.sub(/\A\s*\{.*?"discovered"\s*:\s*\[.*?\].*?\}\s*/m, '').strip
     # Skip up to the last }] (or }) immediately followed by an uppercase letter — covers partial JSON echoes.
     text = text.sub(/\A[\s\S]*?[\}\]]+[\s\}\]]*(?=\p{Lu})/m, '').strip
-    text = text.gsub(/\[TIME CONTROL[^\]]*\][^\n]*/m, '').strip
+    text = text.gsub(/\[TIME[_ ]CONTROL[^\]]*\][^\n]*/m, '').strip
+    text = text.gsub(/pacing=\S+\s*priority_next=\S*/m, '').strip
     text = text.gsub(/\[Start the interview[^\]]*\]/m, '').strip
     text = text.gsub(/\[SESSION RESUME\][^\n]*/m, '').strip
     text.gsub(/\[SISTEM\][^\n]*/m, '').strip

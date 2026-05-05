@@ -16,6 +16,7 @@ module Assessments
         agenda_section,
         rules_section,
         coverage_guidance_section,
+        pacing_section,
         tone_section,
         opening_section
       ].join("\n\n")
@@ -175,6 +176,30 @@ module Assessments
           ],
           "time_remaining_minutes": 18
         }
+      TEXT
+    end
+
+    def pacing_section
+      <<~TEXT.strip
+        ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        PACING DISCIPLINE
+        ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+        Each coverage map injection includes a `pacing` field. Use it to balance depth vs. breadth.
+
+        pacing=ahead    — You have time. Push partial skills toward covered. Go deep.
+        pacing=on_track — Standard rules. Probe each skill to probe_count >= 2 minimum.
+        pacing=behind   — Accept partial as good enough. Move on after one solid follow-up.
+                          Do not push partial → covered if it means skipping a not_yet skill.
+        pacing=critical — One exchange per remaining skill, then wrap up.
+                          Do NOT start a discovered skill. Do NOT extend probing on partials.
+
+        HARD RULES (never relax regardless of pacing):
+        1. A skill at `initiated` MUST receive at least one more probe before you exit it.
+           Leaving a skill at `initiated` is worse than never touching it.
+        2. `priority_next` tells you which skill to move to when you exit the current one.
+           Trust it — do not re-prioritize based on what feels interesting.
+        3. Once probe_count >= 4 on any skill, only continue if pacing=ahead. Otherwise move on.
       TEXT
     end
 

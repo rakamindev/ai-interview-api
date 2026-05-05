@@ -23,12 +23,21 @@ module Coverage
       configured = maps.configured.order(:id)
       discovered = maps.discovered.order(:id)
 
+      remaining_min  = time_remaining_minutes
+      skills_left    = skills_remaining(configured)
+      avg_min        = avg_minutes_per_remaining_skill(remaining_min, skills_left)
+
       payload = {
-        skills:                 configured.map { |m| skill_json(m) },
-        discovered:             discovered.map { |m| skill_json(m) },
-        time_remaining_minutes: time_remaining_minutes,
-        priority_next:          priority_next(configured)
+        skills:                          configured.map { |m| skill_json(m) },
+        discovered:                      discovered.map { |m| skill_json(m) },
+        time_remaining_minutes:          remaining_min,
+        skills_remaining:                skills_left,
+        avg_minutes_per_remaining_skill: avg_min,
+        pacing:                          pacing_bucket(avg_min),
+        priority_next:                   priority_next(configured)
       }
+
+      Rails.logger.info("[MapInjector] Coverage map: skills_remaining=#{skills_left} avg_min=#{avg_min} pacing=#{pacing_bucket(avg_min)} priority_next=#{payload[:priority_next]}")
 
       "[COVERAGE_MAP]\n#{payload.to_json}\n[/COVERAGE_MAP]"
     end
@@ -57,6 +66,27 @@ module Coverage
         state:       map.state,
         probe_count: map.probe_count
       }
+    end
+
+    def skills_remaining(configured_maps)
+      configured_maps.count { |m| m.state != 'covered' }
+    end
+
+    def avg_minutes_per_remaining_skill(remaining_min, skills_left)
+      return nil unless remaining_min
+      return remaining_min if skills_left.zero?
+
+      (remaining_min.to_f / skills_left).round(1)
+    end
+
+    def pacing_bucket(avg_min)
+      return nil unless avg_min
+
+      if avg_min >= 5.0     then 'ahead'
+      elsif avg_min >= 3.0  then 'on_track'
+      elsif avg_min >= 1.5  then 'behind'
+      else                       'critical'
+      end
     end
 
     def time_remaining_minutes
