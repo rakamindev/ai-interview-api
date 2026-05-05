@@ -12,5 +12,8 @@ class FitGapGeneratorWorker
     FitGap::Engine.new(portfolio: portfolio, vacancy: vacancy).call
   rescue ActiveRecord::RecordNotFound => e
     Rails.logger.warn("[N13] Record not found: #{e.message}")
+  rescue StandardError => e
+    Rails.logger.error("[N13] FitGapGeneratorWorker failed for portfolio=#{portfolio_id} vacancy=#{vacancy_id}: #{e.class}: #{e.message}")
+    raise
   end
 end

@@ -108,6 +108,8 @@ class CoverageWebSocketMiddleware
       end
     rescue => e
       Rails.logger.error("[CoverageWS] Redis subscription error for #{channel}: #{e.message}")
+    ensure
+      redis.disconnect!
     end
 
     redis

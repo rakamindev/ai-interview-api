@@ -22,12 +22,10 @@ Rails.application.configure do
   # Enable log buffering.
   config.force_ssl = ENV.fetch("FORCE_SSL", "true") == "true"
 
-  # Log to STDOUT by default.
-  if ENV["RAILS_LOG_TO_STDOUT"].present?
-    logger           = ActiveSupport::Logger.new($stdout)
-    logger.formatter = config.log_formatter
-    config.logger    = ActiveSupport::TaggedLogging.new(logger)
-  end
+  # Log to STDOUT — required for log aggregation in containerized deployments.
+  logger           = ActiveSupport::Logger.new($stdout)
+  logger.formatter = config.log_formatter
+  config.logger    = ActiveSupport::TaggedLogging.new(logger)
 
   # Log level (default: info in production)
   config.log_level = ENV.fetch("RAILS_LOG_LEVEL", "info").to_sym

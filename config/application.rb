@@ -38,13 +38,15 @@ module AiInterview
     # ── Middleware stack ────────────────────────────────────────────────────────
     #
     # Order matters:
-    #   1. Rack::Cors              — CORS headers (configured in config/initializers/cors.rb)
-    #   2. TenantResolverMiddleware— decodes JWT scheme claim → sets Current.organization
+    #   1. Rack::Attack            — rate limiting (before everything else)
+    #   2. Rack::Cors              — CORS headers (configured in config/initializers/cors.rb)
+    #   3. TenantResolverMiddleware— decodes JWT scheme claim → sets Current.organization
     #                               + Current.tenant_id for every request.
     #
     # AuthTokenMiddleware is NOT global — controllers opt in via
     # `authorize_auth_token!` which adds a before_action per controller.
 
+    config.middleware.use Rack::Attack
     config.middleware.use TenantResolverMiddleware
   end
 end

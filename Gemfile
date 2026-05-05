@@ -17,6 +17,7 @@ gem 'request_store', '~> 1.5'
 
 # API
 gem 'rack-cors'
+gem 'rack-attack'
 
 # Environment
 gem 'figaro'
