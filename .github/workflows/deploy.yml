@@ -192,11 +192,7 @@ jobs:
       - name: Set deployment name
         id: deploy-names
         run: |
-          if [ "$ENVIRONMENT" = "development" ]; then
-            echo "app=ai-interview-app-dev" >> "$GITHUB_OUTPUT"
-          else
-            echo "app=ai-interview-app" >> "$GITHUB_OUTPUT"
-          fi
+          echo "app=ai-interview-api" >> "$GITHUB_OUTPUT"
 
       - name: Update deployment image
         env:
@@ -204,7 +200,7 @@ jobs:
           IMAGE_TAG: ${{ steps.image-tag.outputs.tag }}
           APP_DEPLOY: ${{ steps.deploy-names.outputs.app }}
         run: |
-          kubectl set image deploy/"$APP_DEPLOY" ai-interview-app="$IMAGE_PATH:$IMAGE_TAG"
+          kubectl set image deploy/"$APP_DEPLOY" ai-interview-api="$IMAGE_PATH:$IMAGE_TAG"
 
       - name: Annotate deployment
         env:
