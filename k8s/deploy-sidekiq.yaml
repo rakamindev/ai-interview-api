@@ -23,13 +23,7 @@ spec:
     spec:
       # ── Dedicated node pool ─────────────────────────────────────────────────
       nodeSelector:
-        workload: ai-interview
-
-      tolerations:
-        - key: workload
-          operator: Equal
-          value: ai-interview
-          effect: NoSchedule
+        cloud.google.com/gke-nodepool: paragon-t2d-tau-pool
 
       # ── Co-location rules ───────────────────────────────────────────────────
       affinity:

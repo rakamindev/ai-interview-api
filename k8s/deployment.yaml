@@ -1,7 +1,7 @@
 # GKE deployment for ai-interview-api (Rails + Puma + EventMachine WebSocket).
 #
-# Node strategy — 1 API pod + 1 Sidekiq pod per dedicated node (ai-interview-pool):
-#   - nodeSelector + taint/toleration: pods only land on ai-interview-pool nodes
+# Node strategy — 1 API pod + 1 Sidekiq pod per dedicated node (paragon-t2d-tau-pool):
+#   - nodeSelector: pods only land on paragon-t2d-tau-pool nodes
 #   - podAntiAffinity (required): at most 1 API pod per node
 #   - Sidekiq uses podAffinity to follow API pods — see k8s/deploy-sidekiq.yaml
 #   - See k8s/nodepool.yaml for pool creation instructions
@@ -34,13 +34,7 @@ spec:
     spec:
       # ── Dedicated node enforcement ──────────────────────────────────────────
       nodeSelector:
-        workload: ai-interview
-
-      tolerations:
-        - key: workload
-          operator: Equal
-          value: ai-interview
-          effect: NoSchedule
+        cloud.google.com/gke-nodepool: paragon-t2d-tau-pool
 
       # Prevent more than 1 ai-interview pod per physical node.
       # Required (not preferred) so the constraint is never violated.
