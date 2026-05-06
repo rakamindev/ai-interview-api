@@ -65,8 +65,6 @@ spec:
           envFrom:
             - configMapRef:
                 name: ai-interview-config
-            - secretRef:
-                name: ai-interview-secret
 
       # ── Main container ──────────────────────────────────────────────────────
       containers:
@@ -83,8 +81,6 @@ spec:
           envFrom:
             - configMapRef:
                 name: ai-interview-config
-            - secretRef:
-                name: ai-interview-secret
 
           env:
             - name: POD_ID

@@ -1,7 +1,7 @@
 name: Build & Deploy
 
 # Branch → environment mapping:
-#   deployment/* or [deploy] in commit → development (conditional on push)
+#   deployment/* or [deploy] in commit → staging (conditional on push)
 #   staging  → staging     (auto on push)
 #   main     → production  (auto on push)
 
@@ -13,14 +13,14 @@ on:
       environment:
         description: Target environment
         required: true
-        default: development
+        default: staging
         type: choice
-        options: [development, staging, production]
+        options: [staging, production]
 
 jobs:
   determine-environment:
     name: Determine Environment
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     outputs:
       environment: ${{ steps.set-env.outputs.environment }}
       should-deploy: ${{ steps.set-env.outputs.should-deploy }}
@@ -49,12 +49,12 @@ jobs:
             ENV="staging"
             echo "✅ Staging deployment"
           else
-            ENV="development"
+            ENV="staging"
             if [[ ! "$COMMIT_MESSAGE" =~ \[deploy\] ]]; then
               SHOULD_DEPLOY="false"
               echo "⏸️  Skipped — not a deployment/* branch and commit has no [deploy] tag"
             else
-              echo "✅ Development deployment triggered by [deploy] tag"
+              echo "✅ Staging deployment triggered by [deploy] tag"
             fi
           fi
 
@@ -63,7 +63,7 @@ jobs:
 
   build-and-deploy:
     name: Deploy to ${{ needs.determine-environment.outputs.environment }}
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     needs: determine-environment
     if: needs.determine-environment.outputs.should-deploy == 'true'
     environment: ${{ needs.determine-environment.outputs.environment }}
@@ -145,8 +145,6 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-        with:
-          driver: docker
 
       - name: Build and load Docker image
         uses: docker/build-push-action@v5
@@ -194,38 +192,7 @@ jobs:
       - name: Set deployment name
         id: deploy-names
         run: |
-          if [ "$ENVIRONMENT" = "development" ]; then
-            echo "app=ai-interview-app-dev" >> "$GITHUB_OUTPUT"
-          else
-            echo "app=ai-interview-app" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Run database migrations
-        env:
-          IMAGE_PATH: ${{ steps.image.outputs.path }}
-          IMAGE_TAG: ${{ steps.image-tag.outputs.tag }}
-          APP_DEPLOY: ${{ steps.deploy-names.outputs.app }}
-        run: |
-          # Pull DB connection details from the cluster ConfigMap + Secret
-          DB_HOST=$(kubectl get cm "${{ steps.deploy-names.outputs.app == 'ai-interview-app-dev' && 'ai-interview-config-dev' || 'ai-interview-config' }}" -o jsonpath='{.data.DB_HOST}')
-          DB_NAME=$(kubectl get cm "${{ steps.deploy-names.outputs.app == 'ai-interview-app-dev' && 'ai-interview-config-dev' || 'ai-interview-config' }}" -o jsonpath='{.data.DB_NAME}')
-          DB_PORT=$(kubectl get cm "${{ steps.deploy-names.outputs.app == 'ai-interview-app-dev' && 'ai-interview-config-dev' || 'ai-interview-config' }}" -o jsonpath='{.data.DB_PORT}')
-          DB_USER=$(kubectl get secret "${{ steps.deploy-names.outputs.app == 'ai-interview-app-dev' && 'ai-interview-secret-dev' || 'ai-interview-secret' }}" -o jsonpath='{.data.DB_USER}' | base64 -d)
-          DB_PASSWORD=$(kubectl get secret "${{ steps.deploy-names.outputs.app == 'ai-interview-app-dev' && 'ai-interview-secret-dev' || 'ai-interview-secret' }}" -o jsonpath='{.data.DB_PASSWORD}' | base64 -d)
-
-          CONTAINER_ID=$(docker create \
-            -e RAILS_ENV="$ENVIRONMENT" \
-            -e DB_HOST="$DB_HOST" \
-            -e DB_PORT="$DB_PORT" \
-            -e DB_NAME="$DB_NAME" \
-            -e DB_USER="$DB_USER" \
-            -e DB_PASSWORD="$DB_PASSWORD" \
-            "$IMAGE_PATH:$IMAGE_TAG" \
-            bundle exec rails db:migrate)
-
-          docker start -a "$CONTAINER_ID"
-          docker rm "$CONTAINER_ID"
-          echo "✅ Database migration completed"
+          echo "app=ai-interview-api" >> "$GITHUB_OUTPUT"
 
       - name: Update deployment image
         env:
@@ -233,7 +200,9 @@ jobs:
           IMAGE_TAG: ${{ steps.image-tag.outputs.tag }}
           APP_DEPLOY: ${{ steps.deploy-names.outputs.app }}
         run: |
-          kubectl set image deploy/"$APP_DEPLOY" ai-interview-app="$IMAGE_PATH:$IMAGE_TAG"
+          kubectl set image deploy/"$APP_DEPLOY" \
+            ai-interview-api="$IMAGE_PATH:$IMAGE_TAG" \
+            db-migrate="$IMAGE_PATH:$IMAGE_TAG"
 
       - name: Annotate deployment
         env:
@@ -253,15 +222,21 @@ jobs:
           echo "duration=$DURATION" >> "$GITHUB_OUTPUT"
 
       - name: Notify Mattermost on success
-        if: success() && secrets.MM_WEBHOOK != ''
+        if: success()
+        env:
+          MM_WEBHOOK: ${{ secrets.MM_WEBHOOK }}
         run: |
-          curl -fsSL -X POST "${{ secrets.MM_WEBHOOK }}" \
+          [ -z "$MM_WEBHOOK" ] && exit 0
+          curl -fsSL -X POST "$MM_WEBHOOK" \
             -H 'Content-Type: application/json' \
             -d "{\"text\": \"**AI Interview API deployed** :rocket:\n\n**Environment:** $ENVIRONMENT\n**Branch:** ${{ github.ref_name }}\n**Duration:** ${{ steps.duration.outputs.duration }}\"}"
 
       - name: Notify Mattermost on failure
-        if: failure() && secrets.MM_WEBHOOK != ''
+        if: failure()
+        env:
+          MM_WEBHOOK: ${{ secrets.MM_WEBHOOK }}
         run: |
-          curl -fsSL -X POST "${{ secrets.MM_WEBHOOK }}" \
+          [ -z "$MM_WEBHOOK" ] && exit 0
+          curl -fsSL -X POST "$MM_WEBHOOK" \
             -H 'Content-Type: application/json' \
             -d "{\"text\": \"**Deploy failed** @channel :fire:\nBranch \`${{ github.ref_name }}\` → \`$ENVIRONMENT\` failed for ai-interview-api\"}"
