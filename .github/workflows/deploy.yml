@@ -1,7 +1,7 @@
 name: Build & Deploy
 
 # Branch → environment mapping:
-#   deployment/* or [deploy] in commit → development (conditional on push)
+#   deployment/* or [deploy] in commit → staging (conditional on push)
 #   staging  → staging     (auto on push)
 #   main     → production  (auto on push)
 
@@ -13,9 +13,9 @@ on:
       environment:
         description: Target environment
         required: true
-        default: development
+        default: staging
         type: choice
-        options: [development, staging, production]
+        options: [staging, production]
 
 jobs:
   determine-environment:
@@ -49,12 +49,12 @@ jobs:
             ENV="staging"
             echo "✅ Staging deployment"
           else
-            ENV="development"
+            ENV="staging"
             if [[ ! "$COMMIT_MESSAGE" =~ \[deploy\] ]]; then
               SHOULD_DEPLOY="false"
               echo "⏸️  Skipped — not a deployment/* branch and commit has no [deploy] tag"
             else
-              echo "✅ Development deployment triggered by [deploy] tag"
+              echo "✅ Staging deployment triggered by [deploy] tag"
             fi
           fi
 
