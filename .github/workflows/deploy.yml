@@ -200,7 +200,9 @@ jobs:
           IMAGE_TAG: ${{ steps.image-tag.outputs.tag }}
           APP_DEPLOY: ${{ steps.deploy-names.outputs.app }}
         run: |
-          kubectl set image deploy/"$APP_DEPLOY" ai-interview-api="$IMAGE_PATH:$IMAGE_TAG"
+          kubectl set image deploy/"$APP_DEPLOY" \
+            ai-interview-api="$IMAGE_PATH:$IMAGE_TAG" \
+            db-migrate="$IMAGE_PATH:$IMAGE_TAG"
 
       - name: Annotate deployment
         env:
