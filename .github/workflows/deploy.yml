@@ -253,15 +253,21 @@ jobs:
           echo "duration=$DURATION" >> "$GITHUB_OUTPUT"
 
       - name: Notify Mattermost on success
-        if: success() && secrets.MM_WEBHOOK != ''
+        if: success()
+        env:
+          MM_WEBHOOK: ${{ secrets.MM_WEBHOOK }}
         run: |
-          curl -fsSL -X POST "${{ secrets.MM_WEBHOOK }}" \
+          [ -z "$MM_WEBHOOK" ] && exit 0
+          curl -fsSL -X POST "$MM_WEBHOOK" \
             -H 'Content-Type: application/json' \
             -d "{\"text\": \"**AI Interview API deployed** :rocket:\n\n**Environment:** $ENVIRONMENT\n**Branch:** ${{ github.ref_name }}\n**Duration:** ${{ steps.duration.outputs.duration }}\"}"
 
       - name: Notify Mattermost on failure
-        if: failure() && secrets.MM_WEBHOOK != ''
+        if: failure()
+        env:
+          MM_WEBHOOK: ${{ secrets.MM_WEBHOOK }}
         run: |
-          curl -fsSL -X POST "${{ secrets.MM_WEBHOOK }}" \
+          [ -z "$MM_WEBHOOK" ] && exit 0
+          curl -fsSL -X POST "$MM_WEBHOOK" \
             -H 'Content-Type: application/json' \
             -d "{\"text\": \"**Deploy failed** @channel :fire:\nBranch \`${{ github.ref_name }}\` → \`$ENVIRONMENT\` failed for ai-interview-api\"}"
