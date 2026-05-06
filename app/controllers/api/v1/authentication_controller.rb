@@ -28,7 +28,7 @@ module Api
       def resolve_scheme
         request.headers['X-Tenant-Scheme'].presence ||
           ActiveRecord::Base.connection.select_value(
-            "SELECT scheme FROM public.organizations LIMIT 1"
+            "SELECT scheme FROM organizations LIMIT 1"
           ) || 'test-corp'
       end
     end
