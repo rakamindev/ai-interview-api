@@ -20,7 +20,7 @@ on:
 jobs:
   determine-environment:
     name: Determine Environment
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     outputs:
       environment: ${{ steps.set-env.outputs.environment }}
       should-deploy: ${{ steps.set-env.outputs.should-deploy }}
@@ -63,7 +63,7 @@ jobs:
 
   build-and-deploy:
     name: Deploy to ${{ needs.determine-environment.outputs.environment }}
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     needs: determine-environment
     if: needs.determine-environment.outputs.should-deploy == 'true'
     environment: ${{ needs.determine-environment.outputs.environment }}
@@ -163,7 +163,7 @@ jobs:
           if command -v gke-gcloud-auth-plugin &> /dev/null; then
             echo "✅ gke-gcloud-auth-plugin already installed"
           else
-            sudo apt-get install -y google-cloud-cli-gke-gcloud-auth-plugin
+            gcloud components install gke-gcloud-auth-plugin --quiet
           fi
 
       - name: Configure kubectl for GKE
