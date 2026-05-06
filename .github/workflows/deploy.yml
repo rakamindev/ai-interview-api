@@ -198,33 +198,6 @@ jobs:
             echo "app=ai-interview-app" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Run database migrations
-        env:
-          IMAGE_PATH: ${{ steps.image.outputs.path }}
-          IMAGE_TAG: ${{ steps.image-tag.outputs.tag }}
-          APP_DEPLOY: ${{ steps.deploy-names.outputs.app }}
-        run: |
-          # Pull DB connection details from the cluster ConfigMap + Secret
-          DB_HOST=$(kubectl get cm "${{ steps.deploy-names.outputs.app == 'ai-interview-app-dev' && 'ai-interview-config' }}" -o jsonpath='{.data.DB_HOST}')
-          DB_NAME=$(kubectl get cm "${{ steps.deploy-names.outputs.app == 'ai-interview-app-dev' && 'ai-interview-config' }}" -o jsonpath='{.data.DB_NAME}')
-          DB_PORT=$(kubectl get cm "${{ steps.deploy-names.outputs.app == 'ai-interview-app-dev' && 'ai-interview-config' }}" -o jsonpath='{.data.DB_PORT}')
-          DB_USER=$(kubectl get cm "${{ steps.deploy-names.outputs.app == 'ai-interview-app-dev' && 'ai-interview-config' }}" -o jsonpath='{.data.DB_USER}')
-          DB_PASSWORD=$(kubectl get cm "${{ steps.deploy-names.outputs.app == 'ai-interview-app-dev' && 'ai-interview-config' }}" -o jsonpath='{.data.DB_PASSWORD}')
-
-          CONTAINER_ID=$(docker create \
-            -e RAILS_ENV="$ENVIRONMENT" \
-            -e DB_HOST="$DB_HOST" \
-            -e DB_PORT="$DB_PORT" \
-            -e DB_NAME="$DB_NAME" \
-            -e DB_USER="$DB_USER" \
-            -e DB_PASSWORD="$DB_PASSWORD" \
-            "$IMAGE_PATH:$IMAGE_TAG" \
-            bundle exec rails db:migrate)
-
-          docker start -a "$CONTAINER_ID"
-          docker rm "$CONTAINER_ID"
-          echo "✅ Database migration completed"
-
       - name: Update deployment image
         env:
           IMAGE_PATH: ${{ steps.image.outputs.path }}
