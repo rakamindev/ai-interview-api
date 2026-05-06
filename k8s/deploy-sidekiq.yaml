@@ -94,7 +94,7 @@ spec:
                 - grep
                 - -q
                 - "READY: 1"
-                - tmp/sidekiq_status
+                - /ai-interview/tmp/sidekiq_status
             initialDelaySeconds: 10
             periodSeconds: 5
             failureThreshold: 5
@@ -106,7 +106,7 @@ spec:
                 - grep
                 - -q
                 - "READY: 1"
-                - tmp/sidekiq_status
+                - /ai-interview/tmp/sidekiq_status
             initialDelaySeconds: 30
             periodSeconds: 30
             failureThreshold: 3
