@@ -1,0 +1,98 @@
+# GKE Node Pool — ai-interview dedicated nodes
+#
+# Each node runs exactly 2 pods:
+#   - 1 × ai-interview-api      (Rails/Puma, port 3001)
+#   - 1 × ai-interview-sidekiq  (10 concurrent workers)
+#
+# ── Machine type: t2d-standard-4 (SPOT for testing) ────────────────────────
+#
+# Why t2d-standard-4 (4 vCPU / 16 Gi):
+#   API pod limit:      2.0 Gi RAM  + 2.0 CPU
+#   Sidekiq pod limit:  1.5 Gi RAM  + 1.0 CPU
+#   OS + DaemonSets:   ~0.5 Gi RAM  + 0.3 CPU
+#   ─────────────────────────────────────────
+#   Total peak:        ~4.0 Gi RAM  + 3.3 CPU  → fits with ~12 Gi headroom
+#
+# NOTE: Spot is fine for testing. Switch to on-demand for production —
+# GCP gives only 30s preemption notice which kills live WebSocket sessions.
+#
+# ── Create the node pool (spot) ─────────────────────────────────────────────
+#
+#   gcloud container node-pools create ai-interview-spot-pool \
+#     --cluster=<your-cluster-name> \
+#     --region=asia-southeast2 \
+#     --machine-type=t2d-standard-4 \
+#     --disk-type=pd-ssd \
+#     --disk-size=50 \
+#     --num-nodes=1 \
+#     --enable-autoscaling \
+#     --min-nodes=1 \
+#     --max-nodes=10 \
+#     --spot \
+#     --node-labels=workload=ai-interview \
+#     --node-taints=workload=ai-interview:NoSchedule \
+#     --scopes=https://www.googleapis.com/auth/cloud-platform \
+#     --image-type=COS_CONTAINERD
+#
+# ── When ready for production, recreate as on-demand ────────────────────────
+#
+#   gcloud container node-pools create ai-interview-on-demand-pool \
+#     --cluster=<your-cluster-name> \
+#     --region=asia-southeast2 \
+#     --machine-type=t2d-standard-4 \
+#     --disk-type=pd-ssd \
+#     --disk-size=50 \
+#     --num-nodes=1 \
+#     --enable-autoscaling \
+#     --min-nodes=1 \
+#     --max-nodes=10 \
+#     --node-labels=workload=ai-interview \
+#     --node-taints=workload=ai-interview:NoSchedule \
+#     --scopes=https://www.googleapis.com/auth/cloud-platform \
+#     --image-type=COS_CONTAINERD
+#
+# ── Or with Terraform ────────────────────────────────────────────────────────
+#
+# resource "google_container_node_pool" "ai_interview" {
+#   name     = "ai-interview-spot-pool"   # rename to ai-interview-on-demand-pool for prod
+#   cluster  = google_container_cluster.main.id
+#   location = "asia-southeast2"
+#
+#   autoscaling {
+#     min_node_count = 1
+#     max_node_count = 10
+#   }
+#
+#   node_config {
+#     machine_type = "t2d-standard-4"
+#     disk_type    = "pd-ssd"
+#     disk_size_gb = 50
+#     image_type   = "COS_CONTAINERD"
+#     oauth_scopes = ["https://www.googleapis.com/auth/cloud-platform"]
+#
+#     spot = true   # remove for production
+#
+#     labels = {
+#       workload = "ai-interview"
+#     }
+#
+#     taint {
+#       key    = "workload"
+#       value  = "ai-interview"
+#       effect = "NO_SCHEDULE"
+#     }
+#   }
+# }
+#
+# ── Verify nodes are ready ───────────────────────────────────────────────────
+#
+#   kubectl get nodes -l workload=ai-interview
+#   kubectl describe node <node-name> | grep -A5 Taints
+#
+# ── Scale (each replica needs one dedicated node) ───────────────────────────
+#
+#   kubectl scale deployment ai-interview-api      --replicas=<N>
+#   kubectl scale deployment ai-interview-sidekiq  --replicas=<N>
+#
+#   Sidekiq's podAffinity follows the API pods automatically.
+#   Make sure the pool has at least N nodes before scaling up.
