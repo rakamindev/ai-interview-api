@@ -55,7 +55,7 @@ spec:
 
       containers:
         - name: ai-interview-sidekiq
-          image: asia-southeast2-docker.pkg.dev/rakamin-staging/rakamin-images/ai-interview-api:latest
+          image: asia-southeast2-docker.pkg.dev/rakamin-poc/rakamin-images/ai-interview-api:latest
           imagePullPolicy: Always
           command: ["bundle"]
           args: ["exec", "sidekiq", "-e", "staging"]
@@ -63,8 +63,6 @@ spec:
           envFrom:
             - configMapRef:
                 name: ai-interview-config
-            - secretRef:
-                name: ai-interview-secret
 
           env:
             - name: POD_ID
