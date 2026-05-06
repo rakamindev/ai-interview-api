@@ -36,6 +36,12 @@ spec:
       nodeSelector:
         cloud.google.com/gke-nodepool: paragon-t2d-tau-pool
 
+      tolerations:
+        - key: cloud.google.com/compute-class
+          operator: Equal
+          value: paragon-compute-class-tau-nodepool
+          effect: NoSchedule
+
       # Prevent more than 1 ai-interview pod per physical node.
       # Required (not preferred) so the constraint is never violated.
       affinity:
@@ -102,33 +108,31 @@ spec:
               value: /usr/lib/x86_64-linux-gnu/libjemalloc.so.2
             - name: MALLOC_CONF
               value: "background_thread:true,metadata_thp:auto,dirty_decay_ms:5000,muzzy_decay_ms:5000,narenas:2"
-            - name: OTEL_SERVICE_NAME
-              value: ai-interview-api-staging
 
           # Slow startup allowed (Gemini init + DB pool warmup)
           startupProbe:
             httpGet:
-              path: /up
+              path: /health
               port: 3001
             periodSeconds: 10
             failureThreshold: 30   # 5 minutes max startup
 
           readinessProbe:
             httpGet:
-              path: /up
+              path: /health
               port: 3001
             initialDelaySeconds: 10
-            periodSeconds: 20
+            periodSeconds: 30
             failureThreshold: 3
             timeoutSeconds: 10
 
           livenessProbe:
             httpGet:
-              path: /up
+              path: /health
               port: 3001
             initialDelaySeconds: 30
             periodSeconds: 60
-            failureThreshold: 2    # restart after 2 consecutive failures (~2 min)
+            failureThreshold: 3    # restart after 3 consecutive failures (~3 min)
             timeoutSeconds: 15
 
           lifecycle:
