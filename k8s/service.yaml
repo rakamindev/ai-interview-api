@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: ai-interview-app
+  namespace: default
+spec:
+  type: ClusterIP
+  selector:
+    app: ai-interview-api
+  ports:
+    - name: http
+      port: 3001
+      targetPort: 3001
+      protocol: TCP

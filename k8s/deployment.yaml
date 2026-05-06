@@ -1,0 +1,150 @@
+# GKE deployment for ai-interview-api (Rails + Puma + EventMachine WebSocket).
+#
+# Node strategy — 1 API pod + 1 Sidekiq pod per dedicated node (paragon-t2d-tau-pool):
+#   - nodeSelector: pods only land on paragon-t2d-tau-pool nodes
+#   - podAntiAffinity (required): at most 1 API pod per node
+#   - Sidekiq uses podAffinity to follow API pods — see k8s/deploy-sidekiq.yaml
+#   - See k8s/nodepool.yaml for pool creation instructions
+#
+# To scale (N pods = N nodes needed):
+#   kubectl scale deployment ai-interview-api     --replicas=N
+#   kubectl scale deployment ai-interview-sidekiq --replicas=N
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ai-interview-api
+  namespace: default
+  annotations:
+    kubernetes.io/change-cause: "initial-deploy"
+spec:
+  replicas: 1
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app: ai-interview-api
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: ai-interview-api
+    spec:
+      # ── Dedicated node enforcement ──────────────────────────────────────────
+      nodeSelector:
+        cloud.google.com/gke-nodepool: paragon-t2d-tau-pool
+
+      tolerations:
+        - key: cloud.google.com/compute-class
+          operator: Equal
+          value: paragon-compute-class-tau-nodepool
+          effect: NoSchedule
+
+      # Prevent more than 1 ai-interview pod per physical node.
+      # Required (not preferred) so the constraint is never violated.
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: ai-interview-api
+              topologyKey: kubernetes.io/hostname
+
+      # ── Graceful shutdown ───────────────────────────────────────────────────
+      # Puma/EM need time to drain active WebSocket sessions.
+      terminationGracePeriodSeconds: 90
+
+      # ── Init: warm the DB schema cache ─────────────────────────────────────
+      initContainers:
+        - name: db-migrate
+          image: asia-southeast2-docker.pkg.dev/rakamin-poc/rakamin-images/ai-interview-api:latest
+          imagePullPolicy: Always
+          command: ["bundle", "exec", "rails", "db:migrate"]
+          envFrom:
+            - configMapRef:
+                name: ai-interview-config
+            - secretRef:
+                name: ai-interview-secret
+
+      # ── Main container ──────────────────────────────────────────────────────
+      containers:
+        - name: ai-interview-api
+          image: asia-southeast2-docker.pkg.dev/rakamin-poc/rakamin-images/ai-interview-api:latest
+          imagePullPolicy: Always
+          command: ["bundle"]
+          args: ["exec", "puma", "-C", "config/puma.rb"]
+
+          ports:
+            - containerPort: 3001
+              protocol: TCP
+
+          envFrom:
+            - configMapRef:
+                name: ai-interview-config
+            - secretRef:
+                name: ai-interview-secret
+
+          env:
+            - name: POD_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            # Ruby performance
+            - name: RUBYOPT
+              value: "--yjit-exec-mem-size=64 --yjit-code-gc"
+            - name: ENABLE_YJIT
+              value: "true"
+            - name: LD_PRELOAD
+              value: /usr/lib/x86_64-linux-gnu/libjemalloc.so.2
+            - name: MALLOC_CONF
+              value: "background_thread:true,metadata_thp:auto,dirty_decay_ms:5000,muzzy_decay_ms:5000,narenas:2"
+
+          # Slow startup allowed (Gemini init + DB pool warmup)
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 3001
+            periodSeconds: 10
+            failureThreshold: 30   # 5 minutes max startup
+
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3001
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            failureThreshold: 3
+            timeoutSeconds: 10
+
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3001
+            initialDelaySeconds: 30
+            periodSeconds: 60
+            failureThreshold: 3    # restart after 3 consecutive failures (~3 min)
+            timeoutSeconds: 15
+
+          lifecycle:
+            preStop:
+              exec:
+                # Drain in-flight WebSocket sessions before SIGTERM; 90s grace gives Puma time to finish.
+                command: ["sh", "-c", "sleep 30"]
+
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              cpu: "2000m"
+              memory: "2Gi"

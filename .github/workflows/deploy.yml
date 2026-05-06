@@ -50,15 +50,11 @@ jobs:
             echo "✅ Staging deployment"
           else
             ENV="development"
-            if [[ ! "$BRANCH" =~ ^deployment/ ]]; then
-              if [[ ! "$COMMIT_MESSAGE" =~ \[deploy\] ]]; then
-                SHOULD_DEPLOY="false"
-                echo "⏸️  Skipped — not a deployment/* branch and commit has no [deploy] tag"
-              else
-                echo "✅ Development deployment triggered by [deploy] tag"
-              fi
+            if [[ ! "$COMMIT_MESSAGE" =~ \[deploy\] ]]; then
+              SHOULD_DEPLOY="false"
+              echo "⏸️  Skipped — not a deployment/* branch and commit has no [deploy] tag"
             else
-              echo "✅ Development deployment triggered by deployment/* branch"
+              echo "✅ Development deployment triggered by [deploy] tag"
             fi
           fi
 
