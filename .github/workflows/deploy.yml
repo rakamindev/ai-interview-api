@@ -3,7 +3,7 @@ name: Build & Deploy
 # Branch → environment mapping:
 #   deployment/* or [deploy] in commit → staging (conditional on push)
 #   staging  → staging     (auto on push)
-#   main     → production  (auto on push)
+#   main     → staging     (auto on push, production not yet active)
 
 on:
   push:
@@ -42,10 +42,7 @@ jobs:
           BRANCH="${GITHUB_REF#refs/heads/}"
           SHOULD_DEPLOY="true"
 
-          if [ "$BRANCH" = "main" ]; then
-            ENV="production"
-            echo "✅ Production deployment"
-          elif [ "$BRANCH" = "staging" ]; then
+          if [ "$BRANCH" = "main" ] || [ "$BRANCH" = "staging" ]; then
             ENV="staging"
             echo "✅ Staging deployment"
           else
