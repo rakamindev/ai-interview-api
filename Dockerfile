@@ -33,9 +33,7 @@ COPY --from=builder /ai-interview /ai-interview
 
 ENV LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2
 
-RUN mkdir -p tmp/pids tmp/cache tmp/sockets log && \
-    useradd -m -u 1001 appuser && chown -R appuser:appuser /ai-interview
-USER appuser
+RUN mkdir -p tmp/pids tmp/cache tmp/sockets log
 
 EXPOSE 3001
 
