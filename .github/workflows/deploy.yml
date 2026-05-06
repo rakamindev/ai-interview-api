@@ -205,11 +205,11 @@ jobs:
           APP_DEPLOY: ${{ steps.deploy-names.outputs.app }}
         run: |
           # Pull DB connection details from the cluster ConfigMap + Secret
-          DB_HOST=$(kubectl get cm "${{ steps.deploy-names.outputs.app == 'ai-interview-app-dev' && 'ai-interview-config-dev' || 'ai-interview-config' }}" -o jsonpath='{.data.DB_HOST}')
-          DB_NAME=$(kubectl get cm "${{ steps.deploy-names.outputs.app == 'ai-interview-app-dev' && 'ai-interview-config-dev' || 'ai-interview-config' }}" -o jsonpath='{.data.DB_NAME}')
-          DB_PORT=$(kubectl get cm "${{ steps.deploy-names.outputs.app == 'ai-interview-app-dev' && 'ai-interview-config-dev' || 'ai-interview-config' }}" -o jsonpath='{.data.DB_PORT}')
-          DB_USER=$(kubectl get secret "${{ steps.deploy-names.outputs.app == 'ai-interview-app-dev' && 'ai-interview-secret-dev' || 'ai-interview-secret' }}" -o jsonpath='{.data.DB_USER}' | base64 -d)
-          DB_PASSWORD=$(kubectl get secret "${{ steps.deploy-names.outputs.app == 'ai-interview-app-dev' && 'ai-interview-secret-dev' || 'ai-interview-secret' }}" -o jsonpath='{.data.DB_PASSWORD}' | base64 -d)
+          DB_HOST=$(kubectl get cm "${{ steps.deploy-names.outputs.app == 'ai-interview-app-dev' && 'ai-interview-config' }}" -o jsonpath='{.data.DB_HOST}')
+          DB_NAME=$(kubectl get cm "${{ steps.deploy-names.outputs.app == 'ai-interview-app-dev' && 'ai-interview-config' }}" -o jsonpath='{.data.DB_NAME}')
+          DB_PORT=$(kubectl get cm "${{ steps.deploy-names.outputs.app == 'ai-interview-app-dev' && 'ai-interview-config' }}" -o jsonpath='{.data.DB_PORT}')
+          DB_USER=$(kubectl get cm "${{ steps.deploy-names.outputs.app == 'ai-interview-app-dev' && 'ai-interview-config' }}" -o jsonpath='{.data.DB_USER}')
+          DB_PASSWORD=$(kubectl get cm "${{ steps.deploy-names.outputs.app == 'ai-interview-app-dev' && 'ai-interview-config' }}" -o jsonpath='{.data.DB_PASSWORD}')
 
           CONTAINER_ID=$(docker create \
             -e RAILS_ENV="$ENVIRONMENT" \
