@@ -12,7 +12,6 @@ class AudioWebSocketMiddleware
   BROWSER_GRACE_PERIOD = 120 # seconds to keep Gemini alive after browser disconnects
   PROACTIVE_RECONNECT_AFTER = ENV.fetch('PROACTIVE_RECONNECT_AFTER', 510).to_i
   PROACTIVE_RECONNECT_JITTER = 30  # randomise to avoid thundering herd
-  AUDIO_BUFFER_SECONDS = 60        # ring buffer capacity per session
 
   SYSTEM_SIGNAL_TOKEN = 'SYS-TC-7x9k'
 
@@ -71,10 +70,8 @@ class AudioWebSocketMiddleware
     end
   end
 
-  # Always buffer raw PCM (replayed after reconnect); forward only when Gemini is ready and gate is open.
+  # Forward audio frame to Gemini when ready; suppress while model is speaking to prevent echo loop.
   def forward_audio_frame(data, state, session_id)
-    state.audio_buffer.push(data)
-
     if state.model_speaking
       # Server-side audio gate: suppress mic while model is speaking to prevent speaker echo loop.
       unless state.logged_gate_suppressed
@@ -329,10 +326,10 @@ class AudioWebSocketMiddleware
       state.logged_not_ready = false
       if state.reconnecting
         Rails.logger.info("[AudioWS] Gemini reconnected for session #{session.id}")
-        replay_buffered_audio(state)
-        state.reconnect_start_at = nil
         state.reconnecting = false
         state.reconnect_attempts = 0
+        send_json(browser_ws, type: 'reconnected')
+        send_json(browser_ws, type: 'speaker_changed', speaker: 'candidate')
       else
         Rails.logger.info("[AudioWS] Gemini ready — sending session_started for session #{session.id}")
         unless session.gemini_resumption_token.present?
@@ -355,10 +352,10 @@ class AudioWebSocketMiddleware
     Rails.logger.info("[AudioWS] GoAway received for session #{session.id} — reconnecting")
 
     state.proactive_reconnect_timer&.cancel
-    state.reconnect_start_at ||= Process.clock_gettime(Process::CLOCK_MONOTONIC)
     state.reconnecting = true
+    send_json(browser_ws, type: 'reconnecting')
 
-    # Notify browser to unmute mic if AI was speaking — otherwise frontend stays muted post-reconnect.
+    # Reset model_speaking so frontend doesn't stay stuck in muted/AI-speaking state post-reconnect.
     if state.model_speaking
       state.model_speaking = false
       send_json(browser_ws, type: 'speaker_changed', speaker: 'candidate')
@@ -397,10 +394,10 @@ class AudioWebSocketMiddleware
   def schedule_gemini_reconnect(browser_ws, state, code)
     backoff = RECONNECT_BACKOFF[state.reconnect_attempts] || 4
     state.reconnect_attempts += 1
-    state.reconnect_start_at ||= Process.clock_gettime(Process::CLOCK_MONOTONIC)
     state.reconnecting = true
 
     Rails.logger.warn("[AudioWS] Gemini closed unexpectedly (code=#{code}) — retry #{state.reconnect_attempts}/#{MAX_RECONNECT_ATTEMPTS} in #{backoff}s")
+    send_json(browser_ws, type: 'reconnecting') if state.reconnect_attempts == 1
     if state.model_speaking
       state.model_speaking = false
       send_json(browser_ws, type: 'speaker_changed', speaker: 'candidate')
@@ -422,12 +419,18 @@ class AudioWebSocketMiddleware
     message = JSON.parse(data)
 
     case message['type']
+    when 'debug_force_reconnect'
+      if Rails.env.development?
+        Rails.logger.warn("[AudioWS] DEBUG: forcing Gemini disconnect for session #{state.session&.id}")
+        old_client = state.gemini_client
+        handle_gemini_close(browser_ws, state, code: 1011, reason: 'debug_force_reconnect')
+        old_client&.close
+      end
     when 'end_session'
       state.proactive_reconnect_timer&.cancel
       state.graceful_end_timer&.cancel
       state.time_ceiling_timer&.cancel
       state.coverage_end_timer&.cancel
-      state.audio_buffer.clear
       Sessions::EndHandler.new(state.session).call(reason: 'manual_candidate')
       send_json(browser_ws, type: 'session_ended', reason: 'manual_candidate')
       state.gemini_client&.close
@@ -477,7 +480,6 @@ class AudioWebSocketMiddleware
     end
 
     Rails.logger.info("[AudioWS] Initiating proactive reconnect for session #{state.session.id}")
-    state.reconnect_start_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
     state.reconnecting = true
 
     if state.model_speaking
@@ -493,20 +495,6 @@ class AudioWebSocketMiddleware
     state.gemini_client.connect(resumption_handle: token)
     # Close old connection after new one is set up to minimise the gap.
     EM.add_timer(2) { old_client&.close }
-  end
-
-  # Replays buffered audio chunks since reconnect_start_at, paced at ~30ms intervals to avoid VAD confusion.
-  def replay_buffered_audio(state)
-    return unless state.reconnect_start_at
-
-    chunks = state.audio_buffer.since(state.reconnect_start_at)
-    return if chunks.empty?
-
-    total = chunks.sum { |c| c.data.bytesize }
-    Rails.logger.info("[AudioWS] Replaying #{chunks.size} audio chunks (#{total}B) for session #{state.session.id}")
-    chunks.each_with_index do |chunk, i|
-      EM.add_timer(i * 0.03) { state.gemini_client&.send_audio(chunk.data) }
-    end
   end
 
   # Cancellable EM timer (vs Thread.new+sleep) — releases on session end without holding a thread for 2min.
@@ -784,8 +772,8 @@ class AudioWebSocketMiddleware
   class ConnectionState
     attr_accessor :session, :gemini_client, :turn_counter,
                   :reconnect_attempts, :browser_disconnected_at,
-                  :audio_buffer, :proactive_reconnect_timer,
-                  :reconnect_start_at, :latest_resumption_token,
+                  :proactive_reconnect_timer,
+                  :latest_resumption_token,
                   :reconnecting, :last_token_persisted_at,
                   :ending_scheduled, :logged_not_ready,
                   :model_speaking, :last_coverage_digest,
@@ -806,7 +794,6 @@ class AudioWebSocketMiddleware
       @last_ai_turn_ends_with_question = false
       @waiting_for_candidate_response = false
       @sent_time_warnings = Set.new
-      @audio_buffer = AudioRingBuffer.new(capacity_seconds: AudioWebSocketMiddleware::AUDIO_BUFFER_SECONDS)
     end
 
     def increment_turn!
