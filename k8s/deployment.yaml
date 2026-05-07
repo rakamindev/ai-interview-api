@@ -56,16 +56,6 @@ spec:
       # Puma/EM need time to drain active WebSocket sessions.
       terminationGracePeriodSeconds: 90
 
-      # ── Init: warm the DB schema cache ─────────────────────────────────────
-      initContainers:
-        - name: db-migrate
-          image: asia-southeast2-docker.pkg.dev/rakamin-poc/rakamin-images/ai-interview-api:latest
-          imagePullPolicy: Always
-          command: ["bundle", "exec", "rails", "db:migrate"]
-          envFrom:
-            - configMapRef:
-                name: ai-interview-config
-
       # ── Main container ──────────────────────────────────────────────────────
       containers:
         - name: ai-interview-api
