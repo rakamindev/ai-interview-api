@@ -18,6 +18,15 @@ class AudioWebSocketMiddleware
                    ' Acknowledge their last answer in one sentence, then say goodbye in one sentence.' \
                    ' Two sentences total, then stop.'
 
+  # Sent when the model tries to say goodbye while the agenda is still open.
+  # Naming the open skills matters: told only "keep going", the model tends to
+  # re-close on the next turn.
+  def self.continue_signal(labels)
+    "[TIME CONTROL:#{SYSTEM_SIGNAL_TOKEN}] { \"wrap_up\": false, \"all_skills_covered\": false }" \
+      ' — Do NOT close the interview and do NOT say goodbye. These skills still need assessing:' \
+      " #{labels.join(', ')}. Ask your next question about #{labels.first} now."
+  end
+
   def initialize(app)
     @app = app
   end
@@ -126,6 +135,12 @@ class AudioWebSocketMiddleware
     injector = Coverage::MapInjector.new(session)
     state.cached_coverage_text = injector.injection_text
     state.last_coverage_digest = injector.coverage_fingerprint
+
+    # Seed the close guard too. A reconnect mid-interview starts a fresh
+    # ConnectionState, and without this the first close after it would be judged
+    # against defaults rather than the coverage that already exists.
+    state.coverage_complete      = injector.all_covered?
+    state.uncovered_skill_labels = injector.uncovered_skill_labels
 
     build_gemini_client(browser_ws, state)
     state.gemini_client.connect(resumption_handle: session.gemini_resumption_token.presence)
@@ -276,9 +291,15 @@ class AudioWebSocketMiddleware
         unless state.ending_scheduled
           EM.add_timer(cfg(state, 'session.closing_phrase_fallback_seconds')) do
             next if state.ending_scheduled
+
+            # The model may have said goodbye over an unfinished agenda. Push
+            # back here too — otherwise a skipped turnComplete lets the very
+            # close this guard exists to stop through the back door.
+            next if push_back_premature_close(state, session)
+
             Rails.logger.warn("[AudioWS] on_model_turn_complete delayed — finalizing via closing-phrase fallback (session=#{session.id})")
             state.ending_scheduled = true
-            send_json(browser_ws, type: 'preparing_to_end', reason: 'all_covered')
+            send_json(browser_ws, type: 'preparing_to_end', reason: end_reason_for(state))
             poll_for_session_end(browser_ws, state, session, attempts: 0)
           end
         end
@@ -573,6 +594,7 @@ class AudioWebSocketMiddleware
     state.coverage_pending = true if state.wrap_up_injected && !state.coverage_pending
 
     return unless state.coverage_pending && !state.ending_scheduled
+    return if push_back_premature_close(state, session)
 
     if state.wrap_up_injected
       finalize_after_wrap_up(browser_ws, state, session)
@@ -587,7 +609,7 @@ class AudioWebSocketMiddleware
     state.coverage_end_timer&.cancel
     state.ending_scheduled = true
     Rails.logger.info("[AudioWS] Wrap-up turn complete — finalizing session #{session.id}")
-    send_json(browser_ws, type: 'preparing_to_end', reason: 'all_covered')
+    send_json(browser_ws, type: 'preparing_to_end', reason: end_reason_for(state))
     poll_for_session_end(browser_ws, state, session, attempts: 0)
   end
 
@@ -610,11 +632,62 @@ class AudioWebSocketMiddleware
     end
   end
 
+  # The depth gates in the analyzer only govern when a skill may be called
+  # covered — they cannot stop the model from deciding on its own that the
+  # conversation is over. Left unguarded it closes over an open agenda and the
+  # session is recorded as all_covered, which is how a five-skill interview
+  # ended with one skill at two probes.
+  #
+  # Returns true when the close was refused, in which case the caller must not
+  # finalize. Runs on the EM thread, so it reads the cached coverage flags
+  # rather than querying.
+  # The auto-end paths used to report 'all_covered' unconditionally, so a
+  # session that stopped over an open agenda was indistinguishable from one that
+  # finished it. Reads the flag cached by refresh_coverage_cache.
+  def end_reason_for(state)
+    state.coverage_complete ? 'all_covered' : 'ended_early'
+  end
+
+  def push_back_premature_close(state, session)
+    return false if state.wrap_up_injected   # we asked for this close
+    return false if state.coverage_complete
+
+    # Past the wrap-up warning the clock outranks the agenda: closing is now the
+    # correct behaviour, and pushing back would only burn the last turns before
+    # the time ceiling forces the end anyway.
+    return false if state.sent_time_warnings.include?(:warn_wrap_up)
+
+    limit = cfg(state, 'session.max_premature_close_pushbacks')
+
+    # A model that insists on closing would otherwise deadlock the session
+    # against the candidate's patience; concede after the configured attempts
+    # and let the interview end honestly as ended_early.
+    if state.premature_close_pushbacks >= limit
+      Rails.logger.warn("[AudioWS] AI closed early #{state.premature_close_pushbacks}x — conceding " \
+                        "(session=#{session.id} uncovered=#{state.uncovered_skill_labels.join(', ')})")
+      return false
+    end
+
+    labels = state.uncovered_skill_labels
+    return false if labels.empty?   # nothing to point it at
+
+    delivered = state.gemini_client&.inject_context(self.class.continue_signal(labels))
+    return false unless delivered   # silence pump busy — let the close proceed
+
+    state.premature_close_pushbacks += 1
+    state.coverage_pending = false
+    state.last_ai_turn_ends_with_question = false
+
+    Rails.logger.info("[AudioWS] Refused premature close #{state.premature_close_pushbacks}/#{limit} " \
+                      "— steering to #{labels.first} (session=#{session.id})")
+    true
+  end
+
   def finalize_natural_close(browser_ws, state, session)
     state.coverage_end_timer&.cancel
     state.ending_scheduled = true
     Rails.logger.info("[AudioWS] AI closed naturally — finalizing session #{session.id}")
-    send_json(browser_ws, type: 'preparing_to_end', reason: 'all_covered')
+    send_json(browser_ws, type: 'preparing_to_end', reason: end_reason_for(state))
     poll_for_session_end(browser_ws, state, session, attempts: 0)
   end
 
@@ -627,11 +700,11 @@ class AudioWebSocketMiddleware
         ActiveRecord::Base.connection_pool.with_connection do
           if session.reload.ended?
             Rails.logger.info("[AudioWS] Session #{session.id} ended via audio_complete — closing WebSocket")
-            close_session_after_end(browser_ws, state, reason: 'all_covered')
+            close_session_after_end(browser_ws, state, reason: end_reason_for(state))
           elsif attempts >= max_attempts
             Rails.logger.warn("[AudioWS] audio_complete poll timed out — ending session #{session.id} directly")
-            Sessions::EndHandler.new(session).call(reason: 'all_covered')
-            close_session_after_end(browser_ws, state, reason: 'all_covered')
+            Sessions::EndHandler.new(session).call(reason: end_reason_for(state))
+            close_session_after_end(browser_ws, state, reason: end_reason_for(state))
           else
             EM.schedule { poll_for_session_end(browser_ws, state, session, attempts: attempts + 1) }
           end
@@ -649,18 +722,34 @@ class AudioWebSocketMiddleware
     injector = Coverage::MapInjector.new(session)
 
     fingerprint = injector.coverage_fingerprint
+
+    # Refreshed even when the fingerprint is unchanged. Once every skill is
+    # covered the analyzer freezes them, so the digest stops moving — leaving
+    # these stale would disarm the premature-close guard for the rest of the
+    # session and mislabel its end reason.
+    all_covered = injector.all_covered?
+    uncovered   = injector.uncovered_skill_labels
+
     if state.last_coverage_digest == fingerprint
+      EM.schedule do
+        state.coverage_complete      = all_covered
+        state.uncovered_skill_labels = uncovered
+      end
       Rails.logger.debug("[AudioWS] Coverage unchanged — cache still valid (session=#{session.id})")
       return
     end
 
-    text        = injector.injection_text
-    all_covered = injector.all_covered?
-    elapsed     = Process.clock_gettime(Process::CLOCK_MONOTONIC, :millisecond) - started
+    text    = injector.injection_text
+    elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC, :millisecond) - started
 
     EM.schedule do
       state.last_coverage_digest = fingerprint
       state.cached_coverage_text = text
+
+      # Cached so the EM thread can decide whether a close is premature without
+      # touching the DB — the close paths run on the reactor.
+      state.coverage_complete      = all_covered
+      state.uncovered_skill_labels = uncovered
 
       schedule_coverage_wrap_up(state, session) if all_covered
     end
@@ -808,7 +897,9 @@ class AudioWebSocketMiddleware
                   :graceful_end_timer, :time_ceiling_timer,
                   :coverage_end_timer, :coverage_pending,
                   :last_ai_turn_ends_with_question, :wrap_up_injected,
-                  :waiting_for_candidate_response, :config
+                  :waiting_for_candidate_response, :config,
+                  :coverage_complete, :uncovered_skill_labels,
+                  :premature_close_pushbacks
 
     def initialize
       @turn_counter = 0
@@ -819,6 +910,9 @@ class AudioWebSocketMiddleware
       @last_ai_turn_ends_with_question = false
       @waiting_for_candidate_response = false
       @sent_time_warnings = Set.new
+      @coverage_complete = false
+      @uncovered_skill_labels = []
+      @premature_close_pushbacks = 0
     end
 
     def increment_turn!

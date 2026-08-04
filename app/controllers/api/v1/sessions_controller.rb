@@ -121,10 +121,11 @@ module Api
 
         return json_response(ended: true, message: "Session already ended") if session.ended?
 
-        # No coverage re-check here. The backend WS already verified all_covered
-        # before sending preparing_to_end. Re-checking here caused false negatives
-        # (timing gap between WS detection and HTTP call) that stalled auto-end.
-        Sessions::EndHandler.new(session).call(reason: 'all_covered')
+        # Coverage decides the reason, never whether to end. Blocking the end on
+        # a re-check caused false negatives (timing gap between WS detection and
+        # this call) that stalled auto-end, so the session always ends here — it
+        # is just recorded honestly when the agenda was still open.
+        Sessions::EndHandler.new(session).call(reason: end_reason_for(session))
         json_response(ended: true, message: "Session ended")
       end
 
@@ -154,6 +155,16 @@ module Api
       end
 
       private
+
+      # 'all_covered' only when it is true of the configured agenda. Discovered
+      # skills are excluded — they are a by-product of the conversation, not
+      # something the interview promised to assess.
+      def end_reason_for(session)
+        configured = session.coverage_maps.configured
+        return 'ended_early' if configured.empty?
+
+        configured.all? { |m| m.state == 'covered' } ? 'all_covered' : 'ended_early'
+      end
 
       def set_session
         @session = Session.find(params[:id])

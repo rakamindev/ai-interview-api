@@ -72,6 +72,16 @@ module Coverage
       true
     end
 
+    # Configured skills that have not reached "covered", weakest evidence first.
+    # Used to talk the model out of closing early — it needs to be told which
+    # skills are still open, not just that it may not stop.
+    def uncovered_skill_labels
+      @session.coverage_maps.configured
+              .reject { |m| m.state == 'covered' }
+              .sort_by { |m| [m.probe_count, m.id] }
+              .map(&:skill_label)
+    end
+
     # True when coverage is complete but too little of the time limit has been
     # used for closing to be credible. Prevents a 45-minute interview from
     # ending in 15 because the analyzer was generous.

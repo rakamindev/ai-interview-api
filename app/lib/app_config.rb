@@ -75,6 +75,8 @@ module AppConfig
       description: 'One-second polls waiting for the client audio_complete call before ending the session server-side.' },
     { key: 'session.min_elapsed_ratio_before_wrap_up', type: :float, default: 0.6, min: 0.0, max: 1.0, group: 'session',
       description: 'Fraction of the time limit that must elapse before an all-skills-covered session may wrap up. Below it the interviewer is told to deepen the thinnest skill instead of closing. 0 disables the hold.' },
+    { key: 'session.max_premature_close_pushbacks', type: :integer, default: 2, min: 0, max: 10, group: 'session',
+      description: 'How many times the interviewer may be refused when it tries to close with configured skills still uncovered. After the last refusal the close is allowed and the session ends as ended_early. 0 disables the guard.' },
     { key: 'session.browser_grace_period_seconds', type: :integer, default: 120, min: 10, max: 900, group: 'session',
       description: 'How long the Gemini connection is kept alive after the browser disconnects (page refresh recovery).' },
 
