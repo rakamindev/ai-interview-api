@@ -211,6 +211,8 @@ class AudioWebSocketMiddleware
       next unless text.present?
 
       turn_number = state.increment_turn!
+      state.candidate_spoke_since_pushback = true
+      state.holds_since_pushback = 0
 
       maybe_inject_coverage(state, session)
       maybe_piggyback_wrap_up(state, session)
@@ -289,7 +291,11 @@ class AudioWebSocketMiddleware
         end
 
         unless state.ending_scheduled
-          EM.add_timer(cfg(state, 'session.closing_phrase_fallback_seconds')) do
+          # Cancellable, and replaced on each closing phrase: a timer armed by a
+          # close that was later refused must not outlive the refusal and end a
+          # session the interviewer has since resumed.
+          state.closing_fallback_timer&.cancel
+          state.closing_fallback_timer = EM::Timer.new(cfg(state, 'session.closing_phrase_fallback_seconds')) do
             next if state.ending_scheduled
 
             # The model may have said goodbye over an unfinished agenda. Push
@@ -657,6 +663,15 @@ class AudioWebSocketMiddleware
     # the time ceiling forces the end anyway.
     return false if state.sent_time_warnings.include?(:warn_wrap_up)
 
+    # The turn ended on a question, so the interviewer is probing, not leaving —
+    # a closing phrase in front of it is a bridge. Refuse the close without
+    # spending budget: a compliant turn must never be what ends the session.
+    if state.last_ai_turn_ends_with_question
+      state.closing_fallback_timer&.cancel
+      state.coverage_pending = false
+      return true
+    end
+
     limit = cfg(state, 'session.max_premature_close_pushbacks')
 
     # A model that insists on closing would otherwise deadlock the session
@@ -671,10 +686,36 @@ class AudioWebSocketMiddleware
     labels = state.uncovered_skill_labels
     return false if labels.empty?   # nothing to point it at
 
+    # One steer per exchange. The injection makes Gemini generate immediately,
+    # and a model mid-closing tends to repeat the goodbye — steering again on
+    # that repeat produced three AI turns in ten seconds, two of them farewells.
+    # Refuse the close, but stay quiet until the candidate has spoken again.
+    if state.last_pushback_turn && !state.candidate_spoke_since_pushback
+      # Bounded: the candidate has gone quiet because they think it is over, so
+      # the silence pump keeps waking the model and it keeps saying goodbye.
+      # Refusing forever would hold the session hostage until the time ceiling.
+      state.holds_since_pushback += 1
+      if state.holds_since_pushback > limit
+        Rails.logger.warn("[AudioWS] AI kept closing through #{state.holds_since_pushback} silent turns — conceding " \
+                          "(session=#{session.id} uncovered=#{state.uncovered_skill_labels.join(', ')})")
+        return false
+      end
+
+      Rails.logger.info("[AudioWS] Already steered this exchange — holding without re-injecting " \
+                        "(#{state.holds_since_pushback}/#{limit}, session=#{session.id})")
+      state.closing_fallback_timer&.cancel
+      state.coverage_pending = false
+      return true
+    end
+
     delivered = state.gemini_client&.inject_context(self.class.continue_signal(labels))
     return false unless delivered   # silence pump busy — let the close proceed
 
+    state.closing_fallback_timer&.cancel
     state.premature_close_pushbacks += 1
+    state.last_pushback_turn = state.turn_counter
+    state.candidate_spoke_since_pushback = false
+    state.holds_since_pushback = 0
     state.coverage_pending = false
     state.last_ai_turn_ends_with_question = false
 
@@ -899,7 +940,9 @@ class AudioWebSocketMiddleware
                   :last_ai_turn_ends_with_question, :wrap_up_injected,
                   :waiting_for_candidate_response, :config,
                   :coverage_complete, :uncovered_skill_labels,
-                  :premature_close_pushbacks
+                  :premature_close_pushbacks, :last_pushback_turn,
+                  :closing_fallback_timer, :candidate_spoke_since_pushback,
+                  :holds_since_pushback
 
     def initialize
       @turn_counter = 0
@@ -913,6 +956,8 @@ class AudioWebSocketMiddleware
       @coverage_complete = false
       @uncovered_skill_labels = []
       @premature_close_pushbacks = 0
+      @candidate_spoke_since_pushback = false
+      @holds_since_pushback = 0
     end
 
     def increment_turn!
