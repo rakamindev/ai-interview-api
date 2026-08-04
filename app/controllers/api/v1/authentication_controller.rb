@@ -9,13 +9,9 @@ module Api
       def authenticate
         user = User.find_by(email: params[:email].to_s.downcase)
 
-        unless user&.authenticate(params[:password])
-          return json_error("Invalid email or password", :unauthorized)
-        end
+        return json_error('Invalid email or password', :unauthorized) unless user&.authenticate(params[:password])
 
-        unless user.role == 'admin'
-          return json_error("Invalid email or password", :unauthorized)
-        end
+        return json_error('Invalid email or password', :unauthorized) unless user.role == 'admin'
 
         scheme = resolve_scheme
         token  = JsonWebToken.encode({ user_id: user.id, role: user.role, scheme: })
@@ -28,7 +24,7 @@ module Api
       def resolve_scheme
         request.headers['X-Tenant-Scheme'].presence ||
           ActiveRecord::Base.connection.select_value(
-            "SELECT scheme FROM organizations LIMIT 1"
+            'SELECT scheme FROM organizations LIMIT 1'
           ) || 'test-corp'
       end
     end

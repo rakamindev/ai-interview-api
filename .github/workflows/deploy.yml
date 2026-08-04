@@ -191,6 +191,42 @@ jobs:
         run: |
           echo "app=ai-interview-api" >> "$GITHUB_OUTPUT"
 
+      - name: Run database migrations
+        env:
+          IMAGE_PATH: ${{ steps.image.outputs.path }}
+          IMAGE_TAG: ${{ steps.image-tag.outputs.tag }}
+        run: |
+          POD_NAME="db-migrate-${{ steps.image-tag.outputs.tag }}"
+
+          kubectl run "$POD_NAME" \
+            --image="${IMAGE_PATH}:${IMAGE_TAG}" \
+            --restart=Never \
+            --overrides="{
+              \"spec\": {
+                \"containers\": [{
+                  \"name\": \"$POD_NAME\",
+                  \"image\": \"${IMAGE_PATH}:${IMAGE_TAG}\",
+                  \"command\": [\"bundle\", \"exec\", \"rails\", \"db:migrate\"],
+                  \"envFrom\": [{\"configMapRef\": {\"name\": \"ai-interview-config\"}}]
+                }]
+              }
+            }"
+
+          echo "⏳ Waiting for migration pod to complete..."
+          kubectl wait pod/"$POD_NAME" \
+            --for=jsonpath='{.status.phase}'=Succeeded \
+            --timeout=300s || {
+              kubectl logs "$POD_NAME" || true
+              kubectl delete pod "$POD_NAME" --ignore-not-found
+              echo "❌ Migration failed or timed out"
+              exit 1
+            }
+
+          echo "📋 Migration logs:"
+          kubectl logs "$POD_NAME"
+
+          kubectl delete pod "$POD_NAME" --ignore-not-found
+
       - name: Update deployment image
         env:
           IMAGE_PATH: ${{ steps.image.outputs.path }}
@@ -198,8 +234,9 @@ jobs:
           APP_DEPLOY: ${{ steps.deploy-names.outputs.app }}
         run: |
           kubectl set image deploy/"$APP_DEPLOY" \
-            ai-interview-api="$IMAGE_PATH:$IMAGE_TAG" \
-            db-migrate="$IMAGE_PATH:$IMAGE_TAG"
+            ai-interview-api="$IMAGE_PATH:$IMAGE_TAG"
+          kubectl set image deploy/ai-interview-sidekiq \
+            ai-interview-sidekiq="$IMAGE_PATH:$IMAGE_TAG"
 
       - name: Annotate deployment
         env:
@@ -207,6 +244,7 @@ jobs:
           APP_DEPLOY: ${{ steps.deploy-names.outputs.app }}
         run: |
           kubectl annotate deploy/"$APP_DEPLOY" kubernetes.io/change-cause="${{ github.ref_name }}:${{ github.sha }}:$IMAGE_TAG"
+          kubectl annotate deploy/ai-interview-sidekiq kubernetes.io/change-cause="${{ github.ref_name }}:${{ github.sha }}:$IMAGE_TAG"
 
       - name: Calculate deployment duration
         id: duration

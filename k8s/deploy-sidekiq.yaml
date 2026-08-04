@@ -55,7 +55,7 @@ spec:
 
       containers:
         - name: ai-interview-sidekiq
-          image: asia-southeast2-docker.pkg.dev/rakamin-staging/rakamin-images/ai-interview-api:latest
+          image: asia-southeast2-docker.pkg.dev/rakamin-poc/rakamin-images/ai-interview-api:latest
           imagePullPolicy: Always
           command: ["bundle"]
           args: ["exec", "sidekiq", "-e", "staging"]
@@ -63,8 +63,6 @@ spec:
           envFrom:
             - configMapRef:
                 name: ai-interview-config
-            - secretRef:
-                name: ai-interview-secret
 
           env:
             - name: POD_ID
@@ -96,7 +94,7 @@ spec:
                 - grep
                 - -q
                 - "READY: 1"
-                - tmp/sidekiq_status
+                - /ai-interview/tmp/sidekiq_status
             initialDelaySeconds: 10
             periodSeconds: 5
             failureThreshold: 5
@@ -108,7 +106,7 @@ spec:
                 - grep
                 - -q
                 - "READY: 1"
-                - tmp/sidekiq_status
+                - /ai-interview/tmp/sidekiq_status
             initialDelaySeconds: 30
             periodSeconds: 30
             failureThreshold: 3

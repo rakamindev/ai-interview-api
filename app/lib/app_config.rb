@@ -98,10 +98,16 @@ module AppConfig
       description: 'Silence after the last real mic frame before synthetic silence frames are pumped to trigger Gemini VAD.' },
 
     # ── Candidate preflight (consumed by the frontend device check) ───────────
-    { key: 'preflight.min_upload_kbps', type: :integer, default: 500, min: 0, max: 100_000, group: 'preflight',
-      description: 'Minimum measured upload speed (kbps) for the candidate device check. Live audio needs ~256 kbps.', public: true },
-    { key: 'preflight.min_download_kbps', type: :integer, default: 500, min: 0, max: 100_000, group: 'preflight',
-      description: 'Minimum measured download speed (kbps) for the candidate device check.', public: true },
+    # Live audio is raw PCM, base64-encoded over the WebSocket:
+    #   uplink   16kHz x 16-bit mono = 256 kbps, ~341 kbps after base64
+    #   downlink 24kHz x 16-bit mono = 384 kbps, ~512 kbps after base64
+    # The defaults below are those figures with roughly 2x headroom.
+    { key: 'preflight.min_upload_kbps', type: :integer, default: 750, min: 0, max: 100_000, group: 'preflight',
+      description: 'Minimum measured upload speed (kbps) for the candidate device check. The live audio uplink needs ~341 kbps.', public: true },
+    { key: 'preflight.min_download_kbps', type: :integer, default: 1000, min: 0, max: 100_000, group: 'preflight',
+      description: 'Minimum measured download speed (kbps) for the candidate device check. The live audio downlink needs ~512 kbps.', public: true },
+    { key: 'preflight.max_ping_ms', type: :integer, default: 300, min: 0, max: 10_000, group: 'preflight',
+      description: 'Maximum acceptable round-trip latency to the API for the candidate device check.', public: true },
     { key: 'preflight.speed_test_payload_bytes', type: :integer, default: 262_144, min: 1024, max: 10_485_760, group: 'preflight',
       description: 'Payload size the frontend should upload when measuring speed.', public: true },
     { key: 'preflight.speed_test_timeout_ms', type: :integer, default: 10_000, min: 1000, max: 120_000, group: 'preflight',
@@ -126,14 +132,10 @@ module AppConfig
 
   def default(key) = definition(key).default
 
-  # Effective value for a key, honouring tenant → global → default.
+  # Effective value for a key, honouring tenant → global → env → default.
   def get(key, tenant_id: nil)
     setting = definition(key)
-    raw = overrides(tenant_id).fetch(setting.key) { overrides(nil).fetch(setting.key, :__missing__) }
-    raw = setting.env_value || :__missing__ if raw == :__missing__
-    return setting.default if raw == :__missing__
-
-    coerce(setting, raw)
+    resolve(setting, overrides(tenant_id), overrides(nil))
   rescue UnknownKey
     raise
   rescue StandardError => e
@@ -142,9 +144,13 @@ module AppConfig
     REGISTRY[key.to_s]&.default
   end
 
-  # All effective values, keyed by setting key.
+  # All effective values, keyed by setting key. Loads each override scope once
+  # rather than per key — get/1 would otherwise do 2 lookups per setting.
   def all(tenant_id: nil)
-    REGISTRY.keys.index_with { |key| get(key, tenant_id: tenant_id) }
+    tenant_over = overrides(tenant_id)
+    global_over = overrides(nil)
+
+    REGISTRY.transform_values { |setting| resolve(setting, tenant_over, global_over) }
   end
 
   # Effective values plus where each one came from — for the settings UI.
@@ -163,7 +169,7 @@ module AppConfig
         key:         setting.key,
         group:       setting.group,
         type:        setting.type,
-        value:       get(setting.key, tenant_id: tenant_id),
+        value:       resolve(setting, tenant_over, global_over),
         default:     setting.default,
         min:         setting.min,
         max:         setting.max,
@@ -175,9 +181,11 @@ module AppConfig
 
   # Values the candidate-facing frontend is allowed to read without auth.
   def public_values(tenant_id: nil)
+    tenant_over = overrides(tenant_id)
+    global_over = overrides(nil)
+
     REGISTRY.values.select(&:public?)
-            .index_with { |s| get(s.key, tenant_id: tenant_id) }
-            .transform_keys(&:key)
+            .to_h { |setting| [setting.key, resolve(setting, tenant_over, global_over)] }
   end
 
   # Writes an override. tenant_id nil sets the global default for all tenants.
@@ -217,6 +225,15 @@ module AppConfig
   # ── internals ───────────────────────────────────────────────────────────────
 
   def cache_key(tenant_id) = "#{CACHE_NAMESPACE}/#{tenant_id || 'global'}"
+
+  # Applies the resolution order to already-loaded override scopes.
+  def resolve(setting, tenant_over, global_over)
+    raw = tenant_over.fetch(setting.key) { global_over.fetch(setting.key, :__missing__) }
+    raw = setting.env_value || :__missing__ if raw == :__missing__
+    return setting.default if raw == :__missing__
+
+    coerce(setting, raw)
+  end
 
   # Raw (uncoerced) overrides for one scope. Cached so hot paths — coverage
   # injection runs on every turn — don't hit the DB.
