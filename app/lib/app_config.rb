@@ -29,6 +29,10 @@ module AppConfig
     # ── Coverage / probing ────────────────────────────────────────────────────
     { key: 'coverage.min_probes_to_advance', type: :integer, default: 2, min: 1, max: 10, group: 'coverage',
       description: 'Minimum probes on a skill before it may leave "initiated". Hard-enforced by the state engine.' },
+    { key: 'coverage.min_probes_to_cover', type: :integer, default: 4, min: 1, max: 20, group: 'coverage',
+      description: 'Minimum probes before a skill may be declared "covered". Never falls below coverage.min_probes_to_advance.' },
+    { key: 'coverage.max_state_advance_per_turn', type: :integer, default: 1, min: 1, max: 3, group: 'coverage',
+      description: 'How many coverage states a skill may advance in one analyzer run. 1 forces a skill to sit at "partial" for at least one turn.' },
     { key: 'coverage.auto_advance_probe_count', type: :integer, default: 4, min: 1, max: 20, group: 'coverage',
       description: 'Probe count at which a "partial" skill outside the analyzer context window is auto-advanced to "covered".' },
     { key: 'coverage.deep_probe_ceiling', type: :integer, default: 4, min: 1, max: 20, group: 'coverage',
@@ -69,6 +73,8 @@ module AppConfig
       description: 'Fallback finalizer delay when the AI says a closing phrase but turnComplete never arrives.' },
     { key: 'session.end_poll_max_attempts', type: :integer, default: 30, min: 5, max: 300, group: 'session',
       description: 'One-second polls waiting for the client audio_complete call before ending the session server-side.' },
+    { key: 'session.min_elapsed_ratio_before_wrap_up', type: :float, default: 0.6, min: 0.0, max: 1.0, group: 'session',
+      description: 'Fraction of the time limit that must elapse before an all-skills-covered session may wrap up. Below it the interviewer is told to deepen the thinnest skill instead of closing. 0 disables the hold.' },
     { key: 'session.browser_grace_period_seconds', type: :integer, default: 120, min: 10, max: 900, group: 'session',
       description: 'How long the Gemini connection is kept alive after the browser disconnects (page refresh recovery).' },
 

@@ -9,6 +9,8 @@ module Coverage
       @session = session
       @turns_context = AppConfig.get('coverage.analyzer_turns_context', tenant_id: session.tenant_id)
       @min_probes    = AppConfig.get('coverage.min_probes_to_advance', tenant_id: session.tenant_id)
+      @min_cover     = [AppConfig.get('coverage.min_probes_to_cover', tenant_id: session.tenant_id), @min_probes].max
+      @max_advance   = AppConfig.get('coverage.max_state_advance_per_turn', tenant_id: session.tenant_id)
       @gemini_client = gemini_client || Gemini::HttpClient.new(
         model:   ENV.fetch('GEMINI_FLASH_MODEL', 'gemini-2.0-flash-001'),
         timeout: 45
@@ -67,13 +69,18 @@ module Coverage
         2. Apply these state transition rules:
            - not_yet → initiated: AI asked an opening question on this skill in this exchange
            - initiated → partial: (a) at least #{@min_probes - 1} follow-up probe(s) have occurred (probe_count >= #{@min_probes}) AND (b) signal is NOT yet sufficient for confident L1-L5 rating
-           - partial → covered: (a) probe_count >= #{@min_probes} AND (b) enough behavioral evidence to confidently assign an L1-L5 level
+           - partial → covered: (a) probe_count >= #{@min_cover} AND (b) enough behavioral evidence to confidently assign an L1-L5 level
            - HARD RULE: A skill CANNOT advance past "initiated" unless probe_count >= #{@min_probes}. Even if the first answer was exceptional.
+           - HARD RULE: A skill CANNOT reach "covered" unless probe_count >= #{@min_cover}. A confident-sounding answer is not coverage.
+           - A skill advances at most ONE state per exchange. Never propose "covered" for a skill currently at "initiated" — propose "partial".
         3. Update probe_count: increment by 1 for every exchange where this skill was meaningfully discussed.
         4. Check if the candidate mentioned any skill NOT in the coverage map. If yes, add it as a discovered skill with state "initiated".
 
-        CONFIDENCE TEST for "covered":
-        Ask yourself: "If I had to assign L1-L5 to this skill right now, could I defend that rating with 2 specific quotes from the transcript?" If yes → covered. If no → partial.
+        CONFIDENCE TEST for "covered" — all three must hold:
+        1. You could defend an L1-L5 rating with at least 2 specific quotes from the transcript.
+        2. The evidence spans more than one situation or example — not the same story retold.
+        3. The candidate was pushed at least once beyond their first answer (an edge case, a tradeoff, a "what would break") and you saw how they handled it.
+        If any of the three fails → partial. Being unsure means partial, not covered.
 
         OUTPUT (JSON only, no prose):
         {
@@ -139,10 +146,12 @@ module Coverage
 
         # Enforce hard rules via StateEngine
         safe_state = StateEngine.resolve_state(
-          current_state:  map.state,
-          proposed_state: new_state,
-          probe_count:    safe_probe,
-          min_probes:     @min_probes
+          current_state:       map.state,
+          proposed_state:      new_state,
+          probe_count:         safe_probe,
+          min_probes:          @min_probes,
+          min_probes_to_cover: @min_cover,
+          max_advance:         @max_advance
         )
 
         {
