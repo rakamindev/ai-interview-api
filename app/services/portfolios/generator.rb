@@ -38,6 +38,18 @@ module Portfolios
 
     private
 
+    def confidence_high
+      @confidence_high ||= AppConfig.get('portfolio.confidence_high_probe_count', tenant_id: @session.tenant_id)
+    end
+
+    def confidence_medium
+      @confidence_medium ||= AppConfig.get('portfolio.confidence_medium_probe_count', tenant_id: @session.tenant_id)
+    end
+
+    def max_evidence_quotes
+      @max_evidence_quotes ||= AppConfig.get('portfolio.max_evidence_quotes', tenant_id: @session.tenant_id)
+    end
+
     def build_prompt
       assessment       = @session.assessment
       configured_skills = assessment.assessment_skills.order(:display_order)
@@ -82,7 +94,7 @@ module Portfolios
 
         1. FIND THE EVIDENCE
            Read all transcript turns where this skill was discussed.
-           Identify the 2-3 most revealing quotes from the CANDIDATE (not the AI).
+           Identify up to #{max_evidence_quotes} of the most revealing quotes from the CANDIDATE (not the AI).
            A quote is revealing if it shows HOW they think, not just WHAT they know.
 
         2. ASSIGN A LEVEL
@@ -95,9 +107,9 @@ module Portfolios
            What does this person reliably do at this skill? What's the ceiling? What's missing?
 
         4. ASSIGN CONFIDENCE
-           high — probe_count >= 3 AND state = covered
-           medium — probe_count = 2 OR state = partial
-           low — probe_count <= 1 OR state = initiated
+           high — probe_count >= #{confidence_high} AND state = covered
+           medium — probe_count >= #{confidence_medium} OR state = partial
+           low — probe_count < #{confidence_medium} OR state = initiated
 
         OUTPUT (JSON only, no prose):
         {
@@ -160,7 +172,7 @@ module Portfolios
           is_discovered:      false,
           ai_level:           skill_data['level'].to_i.clamp(1, 5),
           ai_confidence:      skill_data['confidence'],
-          evidence:           Array(skill_data['evidence']).first(3),
+          evidence:           Array(skill_data['evidence']).first(max_evidence_quotes),
           competency_summary: skill_data['competency_summary']
         )
       end
@@ -172,7 +184,7 @@ module Portfolios
           is_discovered:      true,
           ai_level:           skill_data['level'].to_i.clamp(1, 5),
           ai_confidence:      skill_data['confidence'],
-          evidence:           Array(skill_data['evidence']).first(3),
+          evidence:           Array(skill_data['evidence']).first(max_evidence_quotes),
           competency_summary: skill_data['competency_summary']
         )
       end

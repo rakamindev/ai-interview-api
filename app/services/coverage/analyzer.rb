@@ -5,10 +5,10 @@ module Coverage
   # using Gemini Flash. Updates coverage states and detects discovered skills.
   # Runs async — failures are non-critical; interview continues with stale map.
   class Analyzer
-    TURNS_CONTEXT = 6
-
     def initialize(session:, gemini_client: nil)
       @session = session
+      @turns_context = AppConfig.get('coverage.analyzer_turns_context', tenant_id: session.tenant_id)
+      @min_probes    = AppConfig.get('coverage.min_probes_to_advance', tenant_id: session.tenant_id)
       @gemini_client = gemini_client || Gemini::HttpClient.new(
         model:   ENV.fetch('GEMINI_FLASH_MODEL', 'gemini-2.0-flash-001'),
         timeout: 45
@@ -34,7 +34,7 @@ module Coverage
     def last_n_turns
       @session.transcript_turns
               .ordered
-              .last(TURNS_CONTEXT)
+              .last(@turns_context)
     end
 
     def build_prompt(turns, coverage_maps, skills)
@@ -66,9 +66,9 @@ module Coverage
         1. For each skill in the coverage map, determine if this exchange produced meaningful signal.
         2. Apply these state transition rules:
            - not_yet → initiated: AI asked an opening question on this skill in this exchange
-           - initiated → partial: (a) at least one follow-up probe has occurred (probe_count >= 2) AND (b) signal is NOT yet sufficient for confident L1-L5 rating
-           - partial → covered: (a) probe_count >= 2 AND (b) enough behavioral evidence to confidently assign an L1-L5 level
-           - HARD RULE: A skill CANNOT advance past "initiated" unless probe_count >= 2. Even if the first answer was exceptional.
+           - initiated → partial: (a) at least #{@min_probes - 1} follow-up probe(s) have occurred (probe_count >= #{@min_probes}) AND (b) signal is NOT yet sufficient for confident L1-L5 rating
+           - partial → covered: (a) probe_count >= #{@min_probes} AND (b) enough behavioral evidence to confidently assign an L1-L5 level
+           - HARD RULE: A skill CANNOT advance past "initiated" unless probe_count >= #{@min_probes}. Even if the first answer was exceptional.
         3. Update probe_count: increment by 1 for every exchange where this skill was meaningfully discussed.
         4. Check if the candidate mentioned any skill NOT in the coverage map. If yes, add it as a discovered skill with state "initiated".
 
@@ -130,7 +130,7 @@ module Coverage
         raw_probe_count = update['new_probe_count'].to_i
         reason          = update['reason']
 
-        # The analyzer runs once per candidate turn with a sliding 6-turn window.
+        # The analyzer runs once per candidate turn with a sliding N-turn window.
         # Consecutive runs share 5 of 6 turns, so Flash double-counts overlapping
         # exchanges and inflates probe_count. Cap the increment at +1 per run:
         # one exchange = one probe. Apply this before the StateEngine gate check
@@ -141,7 +141,8 @@ module Coverage
         safe_state = StateEngine.resolve_state(
           current_state:  map.state,
           proposed_state: new_state,
-          probe_count:    safe_probe
+          probe_count:    safe_probe,
+          min_probes:     @min_probes
         )
 
         {

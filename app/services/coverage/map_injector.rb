@@ -82,11 +82,18 @@ module Coverage
     def pacing_bucket(avg_min)
       return nil unless avg_min
 
-      if avg_min >= 5.0     then 'ahead'
-      elsif avg_min >= 3.0  then 'on_track'
-      elsif avg_min >= 1.5  then 'behind'
-      else                       'critical'
+      if avg_min >= pacing_threshold('ahead')       then 'ahead'
+      elsif avg_min >= pacing_threshold('on_track') then 'on_track'
+      elsif avg_min >= pacing_threshold('behind')   then 'behind'
+      else                                               'critical'
       end
+    end
+
+    # Cached per instance — pacing is recomputed several times per injection.
+    def pacing_threshold(bucket)
+      @pacing_thresholds ||= {}
+      @pacing_thresholds[bucket] ||=
+        AppConfig.get("pacing.#{bucket}_min_minutes", tenant_id: @session.tenant_id)
     end
 
     def time_remaining_minutes

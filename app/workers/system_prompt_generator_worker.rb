@@ -7,8 +7,9 @@ class SystemPromptGeneratorWorker
 
   def perform(assessment_id)
     assessment = Assessment.find(assessment_id)
-    prompt = Assessments::SystemPromptCompiler.new(assessment).call
-    assessment.update!(system_prompt: prompt)
+    compiler = Assessments::SystemPromptCompiler.new(assessment)
+    assessment.update!(system_prompt: compiler.call,
+                       system_prompt_config_digest: compiler.config_digest)
     Rails.logger.info("[N2] System prompt generated for assessment #{assessment_id}")
   rescue ActiveRecord::RecordNotFound
     Rails.logger.warn("[N2] Assessment #{assessment_id} not found — skipping")

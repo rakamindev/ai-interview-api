@@ -9,11 +9,14 @@ module Gemini
   class LiveClient
     GEMINI_WS_URL = 'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent'
 
-    INACTIVITY_TIMEOUT = 30 # reconnect if Gemini produces no meaningful response
-    GATE_OPEN_DELAY    = 0.8 # delay opening mic gate so frontend audio buffer drains and avoids echo loop
+    # Timing defaults live in AppConfig (gemini.* group) and are injected by the
+    # caller; the constants below are the fallbacks used when none are passed.
+    DEFAULT_INACTIVITY_TIMEOUT = 30 # reconnect if Gemini produces no meaningful response
+    DEFAULT_GATE_OPEN_DELAY    = 0.8 # delay opening mic gate so frontend audio buffer drains and avoids echo loop
+    DEFAULT_SILENCE_PUMP_DELAY = 1
 
     # Silence pump: synthetic silent PCM frames sent during browser silence so Gemini's VAD detects end-of-speech.
-    SILENCE_PUMP_DELAY    = 1
+    # The interval and frame size are wire-format constants — not tunable.
     SILENCE_PUMP_INTERVAL = 0.03
     SILENCE_FRAME_SAMPLES = 640
     SILENCE_FRAME = ("\x00" * (SILENCE_FRAME_SAMPLES * 2)).freeze
@@ -33,12 +36,18 @@ module Gemini
       on_close: nil,
       on_error: nil,
       on_ready: nil,
-      on_resumption_token_update: nil
+      on_resumption_token_update: nil,
+      inactivity_timeout: nil,
+      gate_open_delay: nil,
+      silence_pump_delay: nil
     )
       @system_prompt = system_prompt
       @api_key = api_key || ENV.fetch('GEMINI_API_KEY')
       @model = model || ENV.fetch('GEMINI_LIVE_MODEL', 'gemini-3.1-flash-live-preview')
       @voice = voice
+      @inactivity_timeout = inactivity_timeout || DEFAULT_INACTIVITY_TIMEOUT
+      @gate_open_delay    = gate_open_delay    || DEFAULT_GATE_OPEN_DELAY
+      @silence_pump_delay = silence_pump_delay || DEFAULT_SILENCE_PUMP_DELAY
       @resumption_token = nil
       @connected = false
       @ws = nil
@@ -190,7 +199,7 @@ module Gemini
 
       return if @silence_pump_timer
 
-      @silence_pump_timer = EM::Timer.new(SILENCE_PUMP_DELAY) do
+      @silence_pump_timer = EM::Timer.new(@silence_pump_delay) do
         @silence_pump_timer = nil
         check_silence_pump_ready
       end
@@ -201,7 +210,7 @@ module Gemini
       return if @silence_pumping || !@connected || !@ws || @superseded || !@last_real_audio_at || @model_emitting_audio
 
       elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - @last_real_audio_at
-      remaining = SILENCE_PUMP_DELAY - elapsed
+      remaining = @silence_pump_delay - elapsed
 
       if remaining <= 0.02 # close enough — EM timer precision is ~10ms
         start_silence_pump
@@ -217,7 +226,7 @@ module Gemini
       return if @silence_pumping || !@connected || !@ws || @model_emitting_audio
 
       @silence_pumping = true
-      Rails.logger.info('[Gemini::LiveClient] Silence pump started — no real audio for 500ms')
+      Rails.logger.info("[Gemini::LiveClient] Silence pump started — no real audio for #{@silence_pump_delay}s")
 
       silence_msg = {
         realtimeInput: {
@@ -257,7 +266,7 @@ module Gemini
 
         now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
         idle = now - @last_activity_at
-        next unless @silence_pumping && idle >= INACTIVITY_TIMEOUT
+        next unless @silence_pumping && idle >= @inactivity_timeout
 
         Rails.logger.warn("[Gemini::LiveClient] Inactivity detected (#{idle.round(1)}s, silence pumping) — forcing reconnect")
         @inactivity_timer&.cancel
@@ -386,7 +395,7 @@ module Gemini
     end
 
     # Must run before turnComplete handling — both can arrive in the same message and order matters.
-    # Flushes transcription immediately but delays gate open by GATE_OPEN_DELAY so the speaker drains and avoids echo.
+    # Flushes transcription immediately but delays gate open by @gate_open_delay so the speaker drains and avoids echo.
     def handle_generation_complete(data)
       return unless data.dig('serverContent', 'generationComplete')
 
@@ -398,7 +407,7 @@ module Gemini
 
       if emitted_audio
         @gate_timer&.cancel
-        @gate_timer = EM::Timer.new(GATE_OPEN_DELAY) do
+        @gate_timer = EM::Timer.new(@gate_open_delay) do
           unless @superseded
             Rails.logger.info('[Gemini::LiveClient] Gate open — firing on_model_turn_complete')
             @on_model_turn_complete&.call

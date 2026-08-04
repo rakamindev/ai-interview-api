@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[7.0].define(version: 2026_05_05_000002) do
+ActiveRecord::Schema[7.0].define(version: 2026_08_04_000001) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pgcrypto"
   enable_extension "plpgsql"
@@ -24,6 +24,17 @@ ActiveRecord::Schema[7.0].define(version: 2026_05_05_000002) do
   create_enum "generation_status", ["pending", "generating", "complete", "failed"]
   create_enum "session_status", ["pending", "active", "ended", "failed"]
   create_enum "speaker_type", ["ai", "candidate"]
+
+  create_table "app_settings", force: :cascade do |t|
+    t.bigint "tenant_id"
+    t.string "key", limit: 100, null: false
+    t.jsonb "value", null: false
+    t.bigint "updated_by"
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["key"], name: "idx_app_settings_global_key", unique: true, where: "(tenant_id IS NULL)"
+    t.index ["tenant_id", "key"], name: "idx_app_settings_tenant_key", unique: true, where: "(tenant_id IS NOT NULL)"
+  end
 
   create_table "assessment_skills", force: :cascade do |t|
     t.bigint "assessment_id", null: false
@@ -52,6 +63,7 @@ ActiveRecord::Schema[7.0].define(version: 2026_05_05_000002) do
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
     t.string "language", default: "en"
+    t.string "system_prompt_config_digest", limit: 64
     t.index ["tenant_id"], name: "index_assessments_on_tenant_id"
     t.check_constraint "time_limit_min = ANY (ARRAY[10, 30, 45, 60, 90])", name: "chk_assessments_time_limit"
   end

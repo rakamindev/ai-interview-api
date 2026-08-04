@@ -51,7 +51,7 @@ class CoverageAnalyzerWorker
   def create_discovered_skills(session, discovered_skills)
     discovered_skills.each do |discovered|
       next if session.coverage_maps.exists?(skill_label: discovered[:label])
-      next if session.coverage_maps.discovered.count >= 10
+      next if session.coverage_maps.discovered.count >= AppConfig.get('coverage.max_discovered_skills', tenant_id: session.tenant_id)
 
       session.coverage_maps.create!(
         skill_id:      nil,
@@ -82,16 +82,18 @@ class CoverageAnalyzerWorker
   end
 
   # Auto-advance skills that are partial but have fallen outside the analyzer's
-  # context window (last TURNS_CONTEXT turns). Once a skill leaves the window,
-  # Flash can't see it and will never promote it — so we promote here if there's
-  # enough evidence (probe_count >= 4).
+  # context window (coverage.analyzer_turns_context). Once a skill leaves the
+  # window, Flash can't see it and will never promote it — so we promote here if
+  # there's enough evidence (coverage.auto_advance_probe_count).
   #
   # exclude_ids: coverage_map IDs updated in this same job run — those were just
   # discussed and are NOT stale yet.
   def advance_stale_partials(session, exclude_ids: [])
+    threshold = AppConfig.get('coverage.auto_advance_probe_count', tenant_id: session.tenant_id)
+
     scope = session.coverage_maps
                    .where(state: 'partial')
-                   .where('probe_count >= ?', 4)
+                   .where('probe_count >= ?', threshold)
     scope = scope.where.not(id: exclude_ids) if exclude_ids.any?
 
     scope.each do |map|
