@@ -77,6 +77,13 @@ else
   puts "  Created organization: id=#{result['id']} scheme=#{result['scheme']}"
 end
 
+# Every AI interview record is scoped to this tenant. TenantScoped normally
+# fills tenant_id from Current.tenant_id (set per-request from the JWT), but
+# there's no request here — so we pass it explicitly on every create below.
+TENANT_ID = ActiveRecord::Base.connection.select_value(
+  "SELECT id FROM public.organizations WHERE scheme = '#{TEST_ORG[:scheme]}' LIMIT 1"
+)
+
 # ── B7 Skill Taxonomy (22 pilot skills) ──────────────────────────────────────
 
 B7_SKILLS = [
@@ -369,6 +376,125 @@ end
 puts "  Done — #{B7_SKILLS.size} skills seeded."
 puts ""
 
+# ── Admin user ───────────────────────────────────────────────────────────────
+#
+# POST /api/v1/auth/login (used by the frontend) looks this row up and rejects
+# anything whose role isn't 'admin'. Without it there is no way to log in.
+
+ADMIN = { email: "admin@test.com", password: "password123" }.freeze
+
+puts "== Seeding admin user =="
+
+admin = User.find_or_initialize_by(email: ADMIN[:email])
+
+if admin.new_record?
+  admin.password = ADMIN[:password]
+  admin.role     = 'admin'
+  admin.save!
+  puts "  Created admin: #{admin.email} / #{ADMIN[:password]}"
+else
+  puts "  Admin already exists: #{admin.email} (password unchanged)"
+end
+puts ""
+
+# ── Backend Engineer assessment + vacancy ────────────────────────────────────
+#
+# A ready-to-run 30-minute interview so you don't have to click through the
+# builder on every fresh database. Skills are pulled from the taxonomy above,
+# so the level anchors stay in sync with B7_SKILLS.
+
+BACKEND_ROLE   = "Backend Engineer"
+BACKEND_SKILLS = {
+  "SK-ENG-002" => 3, # Node.js / Backend Development
+  "SK-ENG-003" => 3, # System Design & Architecture
+  "SK-ENG-004" => 3, # Database Design & SQL
+  "SK-ENG-005" => 3, # RESTful API Design
+  "SK-ENG-006" => 2  # Testing & Quality Assurance
+}.freeze
+
+taxonomy = SkillTaxonomy.where(skill_id: BACKEND_SKILLS.keys).index_by(&:skill_id)
+
+puts "== Seeding #{BACKEND_ROLE} assessment & vacancy =="
+
+if taxonomy.size != BACKEND_SKILLS.size
+  missing = BACKEND_SKILLS.keys - taxonomy.keys
+  puts "  ERROR: taxonomy rows missing (#{missing.join(', ')}) — skipping"
+else
+  # ── Assessment ──
+  assessment = Assessment.find_or_initialize_by(tenant_id: TENANT_ID, name: BACKEND_ROLE)
+
+  assessment.assign_attributes(
+    time_limit_min: 30,
+    language:       'en',
+    created_by:     admin.id
+  )
+
+  # Rebuild the skill list on every run so re-seeding after a taxonomy edit
+  # doesn't leave stale anchors or duplicate rows behind.
+  assessment.assessment_skills.destroy_all unless assessment.new_record?
+
+  BACKEND_SKILLS.each_with_index do |(skill_id, expected_level), index|
+    taxon = taxonomy.fetch(skill_id)
+
+    assessment.assessment_skills.build(
+      skill_id:       taxon.skill_id,
+      skill_label:    taxon.skill_label,
+      is_custom:      false,
+      scope_include:  taxon.scope_include,
+      scope_exclude:  taxon.scope_exclude,
+      l1_anchor:      taxon.l1_anchor,
+      l2_anchor:      taxon.l2_anchor,
+      l3_anchor:      taxon.l3_anchor,
+      l4_anchor:      taxon.l4_anchor,
+      l5_anchor:      taxon.l5_anchor,
+      expected_level: expected_level,
+      display_order:  index
+    )
+  end
+
+  assessment.save!
+
+  # The API enqueues SystemPromptGeneratorWorker after create, but the compiler
+  # is pure string interpolation — no LLM call — so run it inline and skip the
+  # Redis/Sidekiq dependency during seeding.
+  compiler = Assessments::SystemPromptCompiler.new(assessment.reload)
+  assessment.update!(system_prompt:                 compiler.call,
+                     system_prompt_config_digest:   compiler.config_digest)
+
+  puts "  Assessment: id=#{assessment.id} \"#{assessment.name}\" " \
+       "#{assessment.time_limit_min} min, #{assessment.assessment_skills.size} skills"
+
+  # ── Vacancy ──
+  vacancy = Vacancy.find_or_initialize_by(tenant_id: TENANT_ID, role_title: BACKEND_ROLE)
+
+  vacancy.assign_attributes(
+    created_by: admin.id,
+    culture_dimensions: "Ownership over hand-offs, writes things down, " \
+                        "comfortable disagreeing in code review, ships incrementally.",
+    competency_expectations: "Mid-level: designs and ships a service end-to-end with " \
+                             "light review, reasons about failure modes and data " \
+                             "consistency, and leaves the codebase more testable."
+  )
+
+  vacancy.vacancy_skills.destroy_all unless vacancy.new_record?
+
+  BACKEND_SKILLS.each do |skill_id, expected_level|
+    taxon = taxonomy.fetch(skill_id)
+
+    vacancy.vacancy_skills.build(
+      skill_id:       taxon.skill_id,
+      skill_label:    taxon.skill_label,
+      expected_level: expected_level
+    )
+  end
+
+  vacancy.save!
+
+  puts "  Vacancy:    id=#{vacancy.id} \"#{vacancy.role_title}\", " \
+       "#{vacancy.vacancy_skills.size} skills"
+end
+puts ""
+
 # ── Print usage instructions ──────────────────────────────────────────────────
 
 org = ActiveRecord::Base.connection.select_one(
@@ -382,14 +508,17 @@ puts "Your test organization:"
 puts "  id     : #{org['id']}"
 puts "  scheme : #{org['scheme']}"
 puts ""
-puts "To mint a JWT for testing, open the Rails console:"
+puts "Log in from the frontend (http://localhost:5173) with:"
+puts ""
+puts "  email    : #{ADMIN[:email]}"
+puts "  password : #{ADMIN[:password]}"
+puts ""
+puts "Or mint a JWT by hand in the Rails console:"
 puts ""
 puts "  bundle exec rails console"
 puts ""
-puts "Then run:"
-puts ""
 puts "  # Assessor / admin token (can create assessments, view sessions, etc.)"
-puts "  token = JsonWebToken.encode({ user_id: 1, role: 'admin', scheme: '#{TEST_ORG[:scheme]}' })"
+puts "  token = JsonWebToken.encode({ user_id: #{admin.id}, role: 'admin', scheme: '#{TEST_ORG[:scheme]}' })"
 puts "  puts token"
 puts ""
 puts "  # Candidate token (used in WebSocket ?token= param)"
@@ -399,6 +528,10 @@ puts ""
 puts "Then hit the API:"
 puts ""
 puts "  curl -s http://localhost:3001/api/v1/health"
+puts ""
+puts "  curl -s -X POST http://localhost:3001/api/v1/auth/login \\"
+puts "       -H 'Content-Type: application/json' \\"
+puts "       -d '{\"email\":\"#{ADMIN[:email]}\",\"password\":\"#{ADMIN[:password]}\"}'"
 puts ""
 puts "  curl -s -H 'Authorization: Bearer <your_token>' \\"
 puts "       http://localhost:3001/api/v1/assessments"
