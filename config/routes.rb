@@ -17,8 +17,9 @@ Rails.application.routes.draw do
       }
 
       # Candidate preflight — thresholds served at runtime (no JWT)
-      get  'preflight/config',     to: 'preflight#config'
-      post 'preflight/speed_test', to: 'preflight#speed_test'
+      get  'preflight/config',        to: 'preflight#config'
+      post 'preflight/speed_test',    to: 'preflight#speed_test'
+      get  'preflight/download_test', to: 'preflight#download_test'
 
       # Runtime configuration (read: assessor, write: admin) — no deploy needed
       get    'settings',      to: 'settings#index'

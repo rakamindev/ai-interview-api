@@ -45,5 +45,14 @@ Rails.application.configure do
   config.active_support.disallowed_deprecation_warnings = []
 
   # Use a cache store that supports distributed caching.
-  config.cache_store = :redis_cache_store, { url: ENV.fetch("REDIS_URL", "redis://localhost:6379/0") }
+  # Short timeouts so a Redis outage degrades to "uncached" instead of stalling
+  # requests. AppConfig reads run on the interview hot path and already fall back
+  # to code defaults, but only if the cache call actually returns.
+  config.cache_store = :redis_cache_store, {
+    url:                ENV.fetch("REDIS_URL", "redis://localhost:6379/0"),
+    connect_timeout:    1,
+    read_timeout:       1,
+    write_timeout:      1,
+    reconnect_attempts: 1
+  }
 end
