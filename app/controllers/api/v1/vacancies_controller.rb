@@ -9,7 +9,10 @@ module Api
 
       # GET /api/v1/vacancies
       def index
-        vacancies = paginate(Vacancy.order(created_at: :desc))
+        scope = Vacancy.includes(:vacancy_skills, :fit_gap_reports).order(created_at: :desc)
+        scope = scope.where('vacancies.role_title ILIKE ?', "%#{params[:q]}%") if params[:q].present?
+
+        vacancies = paginate(scope)
 
         json_response(
           vacancies: vacancies.map(&method(:vacancy_json)),
@@ -19,7 +22,11 @@ module Api
 
       # GET /api/v1/vacancies/:id
       def show
-        json_response(vacancy: vacancy_with_skills_json(@vacancy))
+        json_response(
+          vacancy: vacancy_with_skills_json(@vacancy).merge(
+            fit_gap_reports: fit_gap_report_summaries(@vacancy)
+          )
+        )
       end
 
       # POST /api/v1/vacancies
@@ -76,7 +83,10 @@ module Api
           competency_expectations:  vacancy.competency_expectations,
           created_by:               vacancy.created_by,
           created_at:               vacancy.created_at,
-          updated_at:               vacancy.updated_at
+          updated_at:               vacancy.updated_at,
+          skills_count:             vacancy.vacancy_skills.size,
+          fit_gap_reports_count:    vacancy.fit_gap_reports.size,
+          last_fit_gap_at:          vacancy.fit_gap_reports.map(&:generated_at).compact.max
         }
       end
 
@@ -104,6 +114,35 @@ module Api
           l4_anchor:      taxonomy&.l4_anchor,
           l5_anchor:      taxonomy&.l5_anchor
         }
+      end
+
+      # Newest analyses only — the full history can grow unbounded, the UI shows
+      # a count and links out for the rest.
+      FIT_GAP_SUMMARY_LIMIT = 20
+
+      # Which candidates have been analysed against this vacancy, newest first.
+      def fit_gap_report_summaries(vacancy)
+        reports = vacancy.fit_gap_reports
+                         .includes(portfolio: { session: :assessment })
+                         .order(generated_at: :desc)
+                         .limit(FIT_GAP_SUMMARY_LIMIT)
+
+        reports.map do |report|
+          session     = report.portfolio&.session
+          comparisons = report.skill_comparisons || []
+
+          {
+            id:              report.id,
+            portfolio_id:    report.portfolio_id,
+            generated_at:    report.generated_at,
+            session_id:      session&.id,
+            candidate_name:  session&.candidate_name,
+            assessment_id:   session&.assessment_id,
+            assessment_name: session&.assessment&.name,
+            match_count:     comparisons.count { |c| %w[match exceed].include?(c['result']) },
+            gap_count:       comparisons.count { |c| c['result'] == 'gap' }
+          }
+        end
       end
 
       def pagination_meta(collection)

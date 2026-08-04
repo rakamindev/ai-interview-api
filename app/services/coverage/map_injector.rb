@@ -12,9 +12,16 @@ module Coverage
 
     # Returns a fingerprint of coverage state only (excludes time_remaining so
     # a pure clock tick doesn't trigger a redundant re-injection).
+    #
+    # The wrap-up hold IS included: once every skill is covered the analyzer
+    # freezes them, so nothing else in this digest can ever change again. Without
+    # the flag the cache would never refresh and the session would never notice
+    # that the hold has expired.
     def coverage_fingerprint
       maps = @session.coverage_maps.order(:id)
-      Digest::MD5.hexdigest(maps.map { |m| "#{m.id}:#{m.state}:#{m.probe_count}" }.join(','))
+      parts = maps.map { |m| "#{m.id}:#{m.state}:#{m.probe_count}" }
+      parts << "hold:#{wrap_up_held?}"
+      Digest::MD5.hexdigest(parts.join(','))
     end
 
     # Returns the formatted injection string to send via realtimeInput.text.
@@ -37,7 +44,14 @@ module Coverage
         priority_next:                   priority_next(configured)
       }
 
-      Rails.logger.info("[MapInjector] Coverage map: skills_remaining=#{skills_left} avg_min=#{avg_min} pacing=#{pacing_bucket(avg_min)} priority_next=#{payload[:priority_next]}")
+      # Every skill is covered but the interview is far from its time limit —
+      # tell the interviewer to deepen the thinnest skill instead of closing.
+      if wrap_up_held?
+        payload[:wrap_up_blocked] = true
+        payload[:deepen_next]     = thinnest_skill_id(configured)
+      end
+
+      Rails.logger.info("[MapInjector] Coverage map: skills_remaining=#{skills_left} avg_min=#{avg_min} pacing=#{pacing_bucket(avg_min)} priority_next=#{payload[:priority_next]} wrap_up_blocked=#{wrap_up_held?}")
 
       "[COVERAGE_MAP]\n#{payload.to_json}\n[/COVERAGE_MAP]"
     end
@@ -53,11 +67,59 @@ module Coverage
       return false if configured.empty?
       return false unless configured.all? { |m| m.state == 'covered' }
       return false if discovered.any? { |m| m.state == 'initiated' }
+      return false if wrap_up_held?
 
       true
     end
 
+    # Configured skills that have not reached "covered", weakest evidence first.
+    # Used to talk the model out of closing early — it needs to be told which
+    # skills are still open, not just that it may not stop.
+    def uncovered_skill_labels
+      @session.coverage_maps.configured
+              .reject { |m| m.state == 'covered' }
+              .sort_by { |m| [m.probe_count, m.id] }
+              .map(&:skill_label)
+    end
+
+    # True when coverage is complete but too little of the time limit has been
+    # used for closing to be credible. Prevents a 45-minute interview from
+    # ending in 15 because the analyzer was generous.
+    #
+    # Only meaningful once every configured skill is covered — callers check
+    # coverage first, and coverage_fingerprint only needs the flag in that case.
+    def wrap_up_held?
+      return @wrap_up_held unless @wrap_up_held.nil?
+
+      @wrap_up_held = compute_wrap_up_held
+    end
+
     private
+
+    def compute_wrap_up_held
+      ratio = AppConfig.get('session.min_elapsed_ratio_before_wrap_up', tenant_id: @session.tenant_id)
+      return false if ratio <= 0
+      return false unless @session.started_at && @session.assessment.time_limit_min
+
+      # Only holds while coverage is otherwise complete — an unfinished agenda
+      # already keeps the session open on its own.
+      configured = @session.coverage_maps.configured
+      return false if configured.empty?
+      return false unless configured.all? { |m| m.state == 'covered' }
+
+      elapsed  = (Time.current - @session.started_at).to_i
+      required = @session.assessment.time_limit_min * 60 * ratio
+
+      elapsed < required
+    end
+
+    # Weakest-evidence skill: fewest probes, oldest first on a tie.
+    def thinnest_skill_id(configured_maps)
+      best = configured_maps.min_by { |m| [m.probe_count, m.id] }
+      return nil unless best
+
+      best.skill_id || best.skill_label.downcase.gsub(/\s+/, '-')
+    end
 
     def skill_json(map)
       {

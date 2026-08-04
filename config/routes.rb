@@ -17,7 +17,7 @@ Rails.application.routes.draw do
       }
 
       # Candidate preflight — thresholds served at runtime (no JWT)
-      get  'preflight/config',        to: 'preflight#config'
+      get  'preflight/config',        to: 'preflight#thresholds'
       post 'preflight/speed_test',    to: 'preflight#speed_test'
       get  'preflight/download_test', to: 'preflight#download_test'
 
@@ -61,8 +61,11 @@ Rails.application.routes.draw do
       # Vacancies
       resources :vacancies
 
+      # Cross-session listings for the assessor console
+      get 'fit_gap_reports', to: 'fit_gap_reports#index'
+
       # Portfolios — fit/gap and export
-      resources :portfolios, only: [] do
+      resources :portfolios, only: %i[index] do
         member do
           post :fitgap
           post :regenerate_fitgap

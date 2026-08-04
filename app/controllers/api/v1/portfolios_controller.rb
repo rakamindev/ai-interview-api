@@ -8,6 +8,29 @@ module Api
       before_action :set_session,   only: %i[show regenerate]
       before_action :set_portfolio, only: %i[show export]
 
+      # GET /api/v1/portfolios
+      # Every candidate portfolio across sessions, newest first.
+      def index
+        scope = Portfolio.joins(:session)
+                         .includes(:portfolio_skills, session: :assessment)
+                         .order(Arel.sql('portfolios.generated_at DESC NULLS LAST, portfolios.id DESC'))
+        # Portfolio has no tenant_id of its own — scope through the session
+        scope = scope.where(sessions: { tenant_id: Current.tenant_id }) if RequestStore.store.key?(:tenant_id)
+        scope = scope.where('sessions.candidate_name ILIKE ?', "%#{params[:q]}%") if params[:q].present?
+
+        portfolios = paginate(scope)
+
+        json_response(
+          portfolios: portfolios.map(&method(:portfolio_summary_json)),
+          meta: {
+            current_page: portfolios.current_page,
+            total_pages:  portfolios.total_pages,
+            total_count:  portfolios.total_count,
+            per_page:     portfolios.limit_value
+          }
+        )
+      end
+
       # GET /api/v1/sessions/:id/portfolio
       def show
         if @portfolio.nil? || @portfolio.generating?
@@ -169,6 +192,27 @@ module Api
           generation_error:  portfolio.generation_error,
           skills:            portfolio.portfolio_skills.map(&method(:portfolio_skill_json)),
           overrides:         portfolio.assessor_overrides.map(&method(:override_json))
+        }
+      end
+
+      # Row-level view for the portfolios list — counts instead of full skills.
+      def portfolio_summary_json(portfolio)
+        session = portfolio.session
+        skills  = portfolio.portfolio_skills
+
+        {
+          id:                 portfolio.id,
+          session_id:         portfolio.session_id,
+          generation_status:  portfolio.generation_status,
+          generated_at:       portfolio.generated_at,
+          candidate_name:     session&.candidate_name,
+          assessment_id:      session&.assessment_id,
+          assessment_name:    session&.assessment&.name,
+          duration_seconds:   session&.duration_seconds,
+          session_ended_at:   session&.ended_at,
+          skills_count:       skills.count { |s| !s.is_discovered },
+          discovered_count:   skills.count(&:is_discovered),
+          low_confidence_count: skills.count { |s| s.ai_confidence.to_s.casecmp('low').zero? }
         }
       end
 

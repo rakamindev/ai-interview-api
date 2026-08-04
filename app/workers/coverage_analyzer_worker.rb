@@ -89,7 +89,13 @@ class CoverageAnalyzerWorker
   # exclude_ids: coverage_map IDs updated in this same job run — those were just
   # discussed and are NOT stale yet.
   def advance_stale_partials(session, exclude_ids: [])
-    threshold = AppConfig.get('coverage.auto_advance_probe_count', tenant_id: session.tenant_id)
+    # This path writes `covered` directly, bypassing StateEngine — so it must
+    # respect the cover gate itself, never advancing on thinner evidence than a
+    # normal transition would require.
+    threshold = [
+      AppConfig.get('coverage.auto_advance_probe_count', tenant_id: session.tenant_id),
+      AppConfig.get('coverage.min_probes_to_cover', tenant_id: session.tenant_id)
+    ].max
 
     scope = session.coverage_maps
                    .where(state: 'partial')

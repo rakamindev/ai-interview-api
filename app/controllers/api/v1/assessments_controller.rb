@@ -9,9 +9,10 @@ module Api
 
       # GET /api/v1/assessments
       def index
-        assessments = paginate(
-          Assessment.includes(:sessions).order(created_at: :desc)
-        )
+        scope = Assessment.includes(:sessions, :assessment_skills).order(created_at: :desc)
+        scope = scope.where('assessments.name ILIKE ?', "%#{params[:q]}%") if params[:q].present?
+
+        assessments = paginate(scope)
 
         json_response(
           assessments: assessments.map(&method(:assessment_json)),
@@ -87,6 +88,11 @@ module Api
           created_by:     assessment.created_by,
           created_at:     assessment.created_at,
           updated_at:     assessment.updated_at,
+          skills_count:            assessment.assessment_skills.size,
+          sessions_count:          assessment.sessions.size,
+          active_sessions_count:   assessment.sessions.count { |s| s.status == 'active' },
+          completed_sessions_count: assessment.sessions.count { |s| s.status == 'ended' && s.end_reason != 'error' },
+          last_session_at:         latest&.created_at,
           latest_session: latest && {
             id:         latest.id,
             status:     latest.status,

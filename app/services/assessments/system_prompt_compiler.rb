@@ -13,14 +13,15 @@ module Assessments
 
       tenant = assessment.tenant_id
       @min_probes          = AppConfig.get('coverage.min_probes_to_advance', tenant_id: tenant)
-      @deep_probe_ceiling  = AppConfig.get('coverage.deep_probe_ceiling', tenant_id: tenant)
+      @min_cover           = [AppConfig.get('coverage.min_probes_to_cover', tenant_id: tenant), @min_probes].max
+      @deep_probe_ceiling  = [AppConfig.get('coverage.deep_probe_ceiling', tenant_id: tenant), @min_cover].max
       @discovery_exchanges = AppConfig.get('coverage.discovery_max_exchanges', tenant_id: tenant)
     end
 
     # Digest of the runtime config baked into the compiled prompt. Stored on the
     # assessment so a config change can be detected and the prompt recompiled.
     def config_digest
-      Digest::MD5.hexdigest([@min_probes, @deep_probe_ceiling, @discovery_exchanges].join(':'))
+      Digest::MD5.hexdigest([@min_probes, @min_cover, @deep_probe_ceiling, @discovery_exchanges].join(':'))
     end
 
     def call
@@ -92,10 +93,15 @@ module Assessments
         Bad: "Okay, next question — what is your experience with TypeScript?"
         Good: "You mentioned you used useContext for global state — what problems did that cause at scale, and how did you solve them?"
 
-        2. MINIMUM #{@min_probes - 1} FOLLOW-UP#{'S' if @min_probes > 2} PER SKILL
-        You must probe every skill at least #{@min_probes - 1} time#{'s' if @min_probes > 2} with a follow-up before moving on (probe_count >= #{@min_probes}).
-        A follow-up means responding to something they said, not asking a new opening question.
-        No skill is "done" after the first answer.
+        2. EVERY SKILL NEEDS #{@min_cover} EXCHANGES BEFORE IT COUNTS AS ASSESSED
+        One opening question plus at least #{@min_cover - 1} genuine follow-ups. A follow-up means responding to
+        something they said, not asking a new opening question.
+        No skill is "done" after the first answer, and no skill is "done" after a single good answer.
+        Typical shape of those follow-ups:
+          - "Give me a concrete example of when you did that."
+          - "What broke, or what would break, with that approach?"
+          - "What was the tradeoff you chose, and what did you give up?"
+        Only after you have seen the candidate handle a second, different situation is the skill assessed.
 
         3. MAKE THEM DEMONSTRATE, NOT RECITE
         If they say "I know X", make them show it.
@@ -167,14 +173,20 @@ module Assessments
         Coverage states:
         not_yet — you haven't touched this skill yet. Start here.
         initiated — you asked one question. You MUST probe at least #{@min_probes - 1} more time#{'s' if @min_probes > 2}.
-        partial — you've probed but signal is still thin. Go deeper. Do NOT wrap up.
+        partial — you've probed but signal is still thin. Go deeper on THIS skill before moving on. Do NOT wrap up.
+                  Most skills should pass through partial for several exchanges. Reaching #{@min_cover} exchanges is normal, not excessive.
         covered — STOP probing this skill. Move to the next uncovered skill immediately.
         discovered — candidate mentioned this unprompted. Probe briefly (#{@discovery_exchanges} exchanges max), then return to agenda.
 
         CRITICAL RULES:
-        1. Never ask questions about a skill that is already "covered".
+        1. Never ask questions about a skill that is already "covered" — UNLESS it is named in `deepen_next` (see rule 4).
         2. Do NOT wrap up the interview while ANY configured skill is still "not_yet", "initiated", or "partial". Keep probing uncovered skills.
-        3. Only wrap up when ALL configured skills are "covered".
+        3. Only wrap up when ALL configured skills are "covered" AND `wrap_up_blocked` is absent or false.
+        4. If the map contains "wrap_up_blocked": true, the agenda is complete but there is still substantial time left.
+           Do NOT close and do NOT stall. Go back to the skill named in `deepen_next` and push it further than you did
+           the first time: a harder scenario, a failure case, a scaling or tradeoff question, a time they got it wrong.
+           You are looking for the ceiling of their ability, not a recap. Never tell the candidate you are revisiting
+           a topic because time is left — just ask the next question naturally.
 
         Priority: not_yet > initiated > partial > discovered > covered (never probe)
 
@@ -187,7 +199,11 @@ module Assessments
           "discovered": [
             { "label": "Micro-frontend Architecture", "state": "initiated", "probe_count": 1 }
           ],
-          "time_remaining_minutes": 18
+          "time_remaining_minutes": 18,
+          "pacing": "on_track",
+          "priority_next": "communication",
+          "wrap_up_blocked": true,
+          "deepen_next": "react"
         }
       TEXT
     end
@@ -200,7 +216,7 @@ module Assessments
 
         Each coverage map injection includes a `pacing` field. Use it to balance depth vs. breadth.
 
-        pacing=ahead    — You have time. Push partial skills toward covered. Go deep.
+        pacing=ahead    — You have time. Push partial skills toward covered. Go deep — this is the default early on.
         pacing=on_track — Standard rules. Probe each skill to probe_count >= #{@min_probes} minimum.
         pacing=behind   — Accept partial as good enough. Move on after one solid follow-up.
                           Do not push partial → covered if it means skipping a not_yet skill.
@@ -210,6 +226,7 @@ module Assessments
         HARD RULES (never relax regardless of pacing):
         1. A skill at `initiated` MUST receive at least #{@min_probes - 1} more probe#{'s' if @min_probes > 2} before you exit it.
            Leaving a skill at `initiated` is worse than never touching it.
+           Never move on from a skill with fewer than #{@min_cover} exchanges unless pacing=behind or pacing=critical.
         2. `priority_next` tells you which skill to move to when you exit the current one.
            Trust it — do not re-prioritize based on what feels interesting.
         3. Once probe_count >= #{@deep_probe_ceiling} on any skill, only continue if pacing=ahead. Otherwise move on.
