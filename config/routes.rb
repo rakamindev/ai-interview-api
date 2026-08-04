@@ -60,8 +60,11 @@ Rails.application.routes.draw do
       # Vacancies
       resources :vacancies
 
+      # Cross-session listings for the assessor console
+      get 'fit_gap_reports', to: 'fit_gap_reports#index'
+
       # Portfolios — fit/gap and export
-      resources :portfolios, only: [] do
+      resources :portfolios, only: %i[index] do
         member do
           post :fitgap
           post :regenerate_fitgap
