@@ -4,10 +4,14 @@ name: Build & Deploy
 #   deployment/* or [deploy] in commit → staging (conditional on push)
 #   staging  → staging     (auto on push)
 #   main     → staging     (auto on push, production not yet active)
-
+#
+# Only the branches that can actually deploy trigger a run. '**' used to be in
+# this list, so every feature-branch push queued a build that the deploy gate
+# then skipped — on a single self-hosted runner those queued ahead of the main
+# build that was waiting to ship. Use workflow_dispatch to deploy anything else.
 on:
   push:
-    branches: [main, staging, 'deployment/**', '**']
+    branches: [main, staging, 'deployment/**']
   workflow_dispatch:
     inputs:
       environment:
