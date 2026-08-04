@@ -7,11 +7,9 @@ require 'faye/websocket'
 class AudioWebSocketMiddleware
   AUDIO_PATH_PATTERN = %r{\A/ws/sessions/([^/]+)/audio\z}
 
-  MAX_RECONNECT_ATTEMPTS = 3
-  RECONNECT_BACKOFF = [1, 2, 4].freeze
-  BROWSER_GRACE_PERIOD = 120 # seconds to keep Gemini alive after browser disconnects
-  PROACTIVE_RECONNECT_AFTER = ENV.fetch('PROACTIVE_RECONNECT_AFTER', 510).to_i
-  PROACTIVE_RECONNECT_JITTER = 30  # randomise to avoid thundering herd
+  # All tuning numbers live in AppConfig (see the `session.*` and `gemini.*`
+  # groups) and are resolved once per connection via cfg/1 — changing them takes
+  # effect on the next connection, no deploy required.
 
   SYSTEM_SIGNAL_TOKEN = 'SYS-TC-7x9k'
 
@@ -34,6 +32,15 @@ class AudioWebSocketMiddleware
   end
 
   private
+
+  # Runtime config for this connection, memoized per ConnectionState so a hot
+  # path (every audio turn) never round-trips to Redis.
+  def cfg(state, key)
+    state.config ||= {}
+    return state.config[key] if state.config.key?(key)
+
+    state.config[key] = AppConfig.get(key, tenant_id: state.session&.tenant_id)
+  end
 
   def handle_audio_websocket(env, session_id)
     browser_ws = Faye::WebSocket.new(env, nil, ping: 30)
@@ -124,13 +131,23 @@ class AudioWebSocketMiddleware
     state.gemini_client.connect(resumption_handle: session.gemini_resumption_token.presence)
   end
 
+  # Recompiles when the prompt is missing, or when it was compiled under runtime
+  # config that has since changed — otherwise a settings change would only ever
+  # reach assessments created after it.
   def ensure_system_prompt(session)
-    return if session.assessment.system_prompt.present?
+    assessment = session.assessment
+    compiler   = Assessments::SystemPromptCompiler.new(assessment)
+    digest     = compiler.config_digest
 
-    Rails.logger.warn("[AudioWS] system_prompt missing for assessment #{session.assessment.id} — regenerating")
-    Assessments::SystemPromptCompiler.new(session.assessment).call.tap do |prompt|
-      session.assessment.update_column(:system_prompt, prompt)
-    end
+    return if assessment.system_prompt.present? && assessment.system_prompt_config_digest == digest
+
+    reason = assessment.system_prompt.blank? ? 'missing' : 'config changed'
+    Rails.logger.warn("[AudioWS] system_prompt #{reason} for assessment #{assessment.id} — regenerating")
+
+    assessment.update_columns(system_prompt: compiler.call, system_prompt_config_digest: digest)
+  rescue StandardError => e
+    # Never block a session on prompt recompilation — the stored prompt still works.
+    Rails.logger.error("[AudioWS] system_prompt recompilation failed for assessment #{session.assessment_id}: #{e.class} #{e.message}")
   end
 
   def build_gemini_client(browser_ws, state)
@@ -146,7 +163,10 @@ class AudioWebSocketMiddleware
       on_close: ->(code:, reason:) { handle_gemini_close(browser_ws, state, code: code, reason: reason) },
       on_error: ->(message) { Rails.logger.error("[AudioWS] Gemini error: session=#{session.id} #{message}") },
       on_resumption_token_update: build_on_resumption_token_update(state, session),
-      on_ready: build_on_ready(browser_ws, state, session)
+      on_ready: build_on_ready(browser_ws, state, session),
+      inactivity_timeout: cfg(state, 'gemini.inactivity_timeout_seconds'),
+      gate_open_delay:    cfg(state, 'gemini.gate_open_delay_seconds'),
+      silence_pump_delay: cfg(state, 'gemini.silence_pump_delay_seconds')
     )
   end
 
@@ -254,7 +274,7 @@ class AudioWebSocketMiddleware
         end
 
         unless state.ending_scheduled
-          EM.add_timer(15) do
+          EM.add_timer(cfg(state, 'session.closing_phrase_fallback_seconds')) do
             next if state.ending_scheduled
             Rails.logger.warn("[AudioWS] on_model_turn_complete delayed — finalizing via closing-phrase fallback (session=#{session.id})")
             state.ending_scheduled = true
@@ -380,10 +400,12 @@ class AudioWebSocketMiddleware
     state.proactive_reconnect_timer&.cancel
     state.reconnect_attempts ||= 0
 
-    if state.reconnect_attempts < MAX_RECONNECT_ATTEMPTS
+    max_attempts = cfg(state, 'gemini.max_reconnect_attempts')
+
+    if state.reconnect_attempts < max_attempts
       schedule_gemini_reconnect(browser_ws, state, code)
     else
-      Rails.logger.error("[AudioWS] Gemini reconnection failed after #{MAX_RECONNECT_ATTEMPTS} attempts")
+      Rails.logger.error("[AudioWS] Gemini reconnection failed after #{max_attempts} attempts")
       Sessions::EndHandler.new(state.session).call(reason: 'error')
       send_json(browser_ws, type: 'session_ended', reason: 'error',
                             message: 'The session encountered a problem. Please contact the interviewer.')
@@ -392,11 +414,13 @@ class AudioWebSocketMiddleware
   end
 
   def schedule_gemini_reconnect(browser_ws, state, code)
-    backoff = RECONNECT_BACKOFF[state.reconnect_attempts] || 4
+    schedule  = cfg(state, 'gemini.reconnect_backoff_seconds')
+    backoff   = schedule[state.reconnect_attempts] || schedule.last || 4
+    max_tries = cfg(state, 'gemini.max_reconnect_attempts')
     state.reconnect_attempts += 1
     state.reconnecting = true
 
-    Rails.logger.warn("[AudioWS] Gemini closed unexpectedly (code=#{code}) — retry #{state.reconnect_attempts}/#{MAX_RECONNECT_ATTEMPTS} in #{backoff}s")
+    Rails.logger.warn("[AudioWS] Gemini closed unexpectedly (code=#{code}) — retry #{state.reconnect_attempts}/#{max_tries} in #{backoff}s")
     send_json(browser_ws, type: 'reconnecting') if state.reconnect_attempts == 1
     if state.model_speaking
       state.model_speaking = false
@@ -443,7 +467,8 @@ class AudioWebSocketMiddleware
   # Schedules a proactive Gemini reconnect ~8.5min in, before Gemini's 10min hard limit triggers a 1011 close.
   def schedule_proactive_reconnect(browser_ws, state)
     state.proactive_reconnect_timer&.cancel
-    delay = PROACTIVE_RECONNECT_AFTER + rand(PROACTIVE_RECONNECT_JITTER)
+    jitter = cfg(state, 'gemini.proactive_reconnect_jitter_seconds')
+    delay  = cfg(state, 'gemini.proactive_reconnect_after_seconds') + (jitter.positive? ? rand(jitter) : 0)
     state.proactive_reconnect_timer = EM::Timer.new(delay) do
       initiate_proactive_reconnect(browser_ws, state)
     end
@@ -501,7 +526,7 @@ class AudioWebSocketMiddleware
   def schedule_graceful_end(browser_ws, state)
     return unless state.session
 
-    state.graceful_end_timer = EM::Timer.new(BROWSER_GRACE_PERIOD) do
+    state.graceful_end_timer = EM::Timer.new(cfg(state, 'session.browser_grace_period_seconds')) do
       Thread.new do
         ActiveRecord::Base.connection_pool.with_connection do
           next if state.session.reload.ended?
@@ -573,7 +598,7 @@ class AudioWebSocketMiddleware
     Rails.logger.info("[AudioWS] AI ended with question — waiting for candidate response before wrap-up (session=#{session.id})")
 
     state.coverage_end_timer&.cancel
-    state.coverage_end_timer = EM::Timer.new(20) do
+    state.coverage_end_timer = EM::Timer.new(cfg(state, 'session.wrap_up_silence_fallback_seconds')) do
       next if state.ending_scheduled || state.wrap_up_injected
 
       delivered = state.gemini_client&.inject_context(WRAP_UP_SIGNAL)
@@ -595,7 +620,7 @@ class AudioWebSocketMiddleware
 
   # Polls until the session is ended (via audio_complete API call) or max_attempts is reached.
   def poll_for_session_end(browser_ws, state, session, attempts:)
-    max_attempts = 30
+    max_attempts = cfg(state, 'session.end_poll_max_attempts')
 
     EM.add_timer(1) do
       Thread.new do
@@ -668,11 +693,11 @@ class AudioWebSocketMiddleware
 
     if remaining <= 0
       enforce_time_ceiling(session, state, browser_ws)
-    elsif remaining <= 60 && !state.sent_time_warnings.include?(:warn_60)
-      mark_warning_if_delivered(state, :warn_60,
+    elsif remaining <= cfg(state, 'session.wrap_up_warning_seconds') && !state.sent_time_warnings.include?(:warn_wrap_up)
+      mark_warning_if_delivered(state, :warn_wrap_up,
         "[TIME CONTROL:#{SYSTEM_SIGNAL_TOKEN}] { \"wrap_up\": true }")
-    elsif remaining <= 120 && !state.sent_time_warnings.include?(:warn_120)
-      mark_warning_if_delivered(state, :warn_120,
+    elsif remaining <= cfg(state, 'session.time_warning_seconds') && !state.sent_time_warnings.include?(:warn_time)
+      mark_warning_if_delivered(state, :warn_time,
         "[TIME CONTROL:#{SYSTEM_SIGNAL_TOKEN}] { \"time_warning\": true }")
     end
   end
@@ -684,7 +709,7 @@ class AudioWebSocketMiddleware
 
     state.ending_scheduled = true
 
-    state.time_ceiling_timer = EM::Timer.new(60) do
+    state.time_ceiling_timer = EM::Timer.new(cfg(state, 'session.time_ceiling_grace_seconds')) do
       Thread.new do
         ActiveRecord::Base.connection_pool.with_connection do
           next if session.reload.ended?
@@ -783,7 +808,7 @@ class AudioWebSocketMiddleware
                   :graceful_end_timer, :time_ceiling_timer,
                   :coverage_end_timer, :coverage_pending,
                   :last_ai_turn_ends_with_question, :wrap_up_injected,
-                  :waiting_for_candidate_response
+                  :waiting_for_candidate_response, :config
 
     def initialize
       @turn_counter = 0

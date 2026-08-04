@@ -14,12 +14,15 @@ module Coverage
     }.freeze
 
     # Returns true if a transition from `from` to `to` is valid given probe_count.
-    def self.valid_transition?(from:, to:, probe_count:)
+    # min_probes defaults to the runtime-configured minimum (coverage.min_probes_to_advance).
+    def self.valid_transition?(from:, to:, probe_count:, min_probes: nil)
       return false unless VALID_TRANSITIONS[from]&.include?(to)
 
-      # HARD RULE: cannot advance past initiated without at least 2 probes
+      min_probes ||= AppConfig.get('coverage.min_probes_to_advance')
+
+      # HARD RULE: cannot advance past initiated without the configured minimum probes
       if to == 'partial' || to == 'covered'
-        return false if probe_count < 2
+        return false if probe_count < min_probes
       end
 
       true
@@ -30,8 +33,10 @@ module Coverage
     # forward one step at a time, applying probe_count gates at each step.
     # This prevents the state from getting stuck when Flash proposes a
     # state multiple steps ahead.
-    def self.resolve_state(current_state:, proposed_state:, probe_count:)
+    def self.resolve_state(current_state:, proposed_state:, probe_count:, min_probes: nil)
       return current_state if current_state == proposed_state
+
+      min_probes ||= AppConfig.get('coverage.min_probes_to_advance')
 
       current_idx  = STATES.index(current_state) || 0
       proposed_idx = STATES.index(proposed_state)
@@ -43,7 +48,7 @@ module Coverage
       result = current_state
       (current_idx + 1).upto(proposed_idx) do |i|
         candidate = STATES[i]
-        break unless valid_transition?(from: result, to: candidate, probe_count: probe_count)
+        break unless valid_transition?(from: result, to: candidate, probe_count: probe_count, min_probes: min_probes)
 
         result = candidate
       end

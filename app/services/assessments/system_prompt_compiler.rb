@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require 'digest'
+
 module Assessments
   # Compiles the system prompt for a Gemini Live session from an assessment config.
   # This is pure string interpolation — no LLM call needed.
@@ -8,6 +10,17 @@ module Assessments
     def initialize(assessment)
       @assessment = assessment
       @skills = assessment.assessment_skills.order(:display_order)
+
+      tenant = assessment.tenant_id
+      @min_probes          = AppConfig.get('coverage.min_probes_to_advance', tenant_id: tenant)
+      @deep_probe_ceiling  = AppConfig.get('coverage.deep_probe_ceiling', tenant_id: tenant)
+      @discovery_exchanges = AppConfig.get('coverage.discovery_max_exchanges', tenant_id: tenant)
+    end
+
+    # Digest of the runtime config baked into the compiled prompt. Stored on the
+    # assessment so a config change can be detected and the prompt recompiled.
+    def config_digest
+      Digest::MD5.hexdigest([@min_probes, @deep_probe_ceiling, @discovery_exchanges].join(':'))
     end
 
     def call
@@ -79,8 +92,8 @@ module Assessments
         Bad: "Okay, next question — what is your experience with TypeScript?"
         Good: "You mentioned you used useContext for global state — what problems did that cause at scale, and how did you solve them?"
 
-        2. MINIMUM ONE FOLLOW-UP PER SKILL
-        You must probe every skill at least once with a follow-up before moving on.
+        2. MINIMUM #{@min_probes - 1} FOLLOW-UP#{'S' if @min_probes > 2} PER SKILL
+        You must probe every skill at least #{@min_probes - 1} time#{'s' if @min_probes > 2} with a follow-up before moving on (probe_count >= #{@min_probes}).
         A follow-up means responding to something they said, not asking a new opening question.
         No skill is "done" after the first answer.
 
@@ -95,7 +108,7 @@ module Assessments
         - Strong answer → stress test: "How would that change at 10x the scale? With a distributed team?"
 
         5. OFF-AGENDA DISCOVERIES
-        If the candidate mentions a skill you are NOT assessing, briefly probe it (2-3 exchanges maximum), then naturally return to your agenda.
+        If the candidate mentions a skill you are NOT assessing, briefly probe it (#{@discovery_exchanges} exchanges maximum), then naturally return to your agenda.
         If all configured skills are already covered when a discovery happens, probe it briefly then wrap up — do not keep probing indefinitely.
         Example: "That's interesting — you mentioned you led a micro-frontend migration. Tell me briefly about the architecture. [listen] Good. Let's come back to [configured skill]..."
 
@@ -153,10 +166,10 @@ module Assessments
 
         Coverage states:
         not_yet — you haven't touched this skill yet. Start here.
-        initiated — you asked one question. You MUST probe at least once more.
+        initiated — you asked one question. You MUST probe at least #{@min_probes - 1} more time#{'s' if @min_probes > 2}.
         partial — you've probed but signal is still thin. Go deeper. Do NOT wrap up.
         covered — STOP probing this skill. Move to the next uncovered skill immediately.
-        discovered — candidate mentioned this unprompted. Probe briefly (2-3 exchanges max), then return to agenda.
+        discovered — candidate mentioned this unprompted. Probe briefly (#{@discovery_exchanges} exchanges max), then return to agenda.
 
         CRITICAL RULES:
         1. Never ask questions about a skill that is already "covered".
@@ -188,18 +201,18 @@ module Assessments
         Each coverage map injection includes a `pacing` field. Use it to balance depth vs. breadth.
 
         pacing=ahead    — You have time. Push partial skills toward covered. Go deep.
-        pacing=on_track — Standard rules. Probe each skill to probe_count >= 2 minimum.
+        pacing=on_track — Standard rules. Probe each skill to probe_count >= #{@min_probes} minimum.
         pacing=behind   — Accept partial as good enough. Move on after one solid follow-up.
                           Do not push partial → covered if it means skipping a not_yet skill.
         pacing=critical — One exchange per remaining skill, then wrap up.
                           Do NOT start a discovered skill. Do NOT extend probing on partials.
 
         HARD RULES (never relax regardless of pacing):
-        1. A skill at `initiated` MUST receive at least one more probe before you exit it.
+        1. A skill at `initiated` MUST receive at least #{@min_probes - 1} more probe#{'s' if @min_probes > 2} before you exit it.
            Leaving a skill at `initiated` is worse than never touching it.
         2. `priority_next` tells you which skill to move to when you exit the current one.
            Trust it — do not re-prioritize based on what feels interesting.
-        3. Once probe_count >= 4 on any skill, only continue if pacing=ahead. Otherwise move on.
+        3. Once probe_count >= #{@deep_probe_ceiling} on any skill, only continue if pacing=ahead. Otherwise move on.
       TEXT
     end
 

@@ -16,6 +16,17 @@ Rails.application.routes.draw do
         [200, { 'Content-Type' => 'application/json' }, [{ received_bytes: bytes }.to_json]]
       }
 
+      # Candidate preflight — thresholds served at runtime (no JWT)
+      get  'preflight/config',        to: 'preflight#config'
+      post 'preflight/speed_test',    to: 'preflight#speed_test'
+      get  'preflight/download_test', to: 'preflight#download_test'
+
+      # Runtime configuration (read: assessor, write: admin) — no deploy needed
+      get    'settings',      to: 'settings#index'
+      put    'settings',      to: 'settings#bulk_update'
+      patch  'settings/:key', to: 'settings#update',  constraints: { key: /[^\/]+/ }, format: false
+      delete 'settings/:key', to: 'settings#destroy', constraints: { key: /[^\/]+/ }, format: false
+
       # Assessments
       resources :assessments do
         resources :sessions, only: %i[index create]
