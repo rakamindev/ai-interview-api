@@ -10,7 +10,12 @@ module Api
 
       # GET /api/v1/preflight/config
       # Thresholds the frontend enforces during the device check.
-      def config
+      #
+      # NOTE: do not name this action `config`. ActionController inherits a
+      # `config` reader from ActiveSupport::Configurable, and the rendering
+      # stack calls it — an action by that name shadows it, so `render` re-runs
+      # the action and every request dies with SystemStackError.
+      def thresholds
         json_response(preflight: AppConfig.public_values(tenant_id: resolved_tenant_id))
       end
 
