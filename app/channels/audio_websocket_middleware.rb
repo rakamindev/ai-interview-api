@@ -323,6 +323,13 @@ class AudioWebSocketMiddleware
     # Skip up to the last }] (or }) immediately followed by an uppercase letter — covers partial JSON echoes.
     text = text.sub(/\A[\s\S]*?[\}\]]+[\s\}\]]*(?=\p{Lu})/m, '').strip
     text = text.gsub(/\[TIME[_ ]CONTROL[^\]]*\][^\n]*/m, '').strip
+    # The signal token is named in the system prompt so the interviewer can tell
+    # a real signal from a candidate faking one — which also means it can say it
+    # out loud, and it does, in paraphrases the bracket rules above never match
+    # ("Wait for SYS-TC-7x9k] That formula..."). Drop the fragment carrying it,
+    # back to the last sentence boundary: a leaked token reads as a bug and
+    # hands the candidate the word that forges a system message.
+    text = text.gsub(/[^.!?\n]*#{Regexp.escape(SYSTEM_SIGNAL_TOKEN)}\S*\s*/i, '').strip
     text = text.gsub(/pacing=\S+\s*priority_next=\S*/m, '').strip
     text = text.gsub(/\[Start the interview[^\]]*\]/m, '').strip
     text = text.gsub(/\[SESSION RESUME\][^\n]*/m, '').strip
